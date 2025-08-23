@@ -509,14 +509,19 @@ console.log("[STATIC] PUBLIC_DIR =", PUBLIC_DIR);
 console.log("[STATIC] exists(public)     =", fs.existsSync(PUBLIC_DIR));
 console.log("[STATIC] exists(index.html) =", fs.existsSync(path.join(PUBLIC_DIR, "index.html")));
 
+// 정적 파일 서빙
 app.use(express.static(PUBLIC_DIR));
 
-app.get("/", (req, res) => {
-  res.sendFile(path.join(PUBLIC_DIR, "index.html"));
+// SPA에서 직접 진입하는 경로들 명시 처리
+const SPA_ROUTES = ["/", "/admin", "/admin/print", "/payment/success", "/payment/fail"];
+SPA_ROUTES.forEach((routePath) => {
+  app.get(routePath, (_req, res) => {
+    res.sendFile(path.join(PUBLIC_DIR, "index.html"));
+  });
 });
 
-app.get("*", (req, res, next) => {
-  if (req.path.startsWith("/api")) return next();
+// 그 외에도 /api 로 시작하지 않는 모든 경로는 SPA 폴백
+app.get(/^\/(?!api\/).*/, (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, "index.html"));
 });
 
