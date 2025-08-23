@@ -10,6 +10,10 @@ import { v4 as uuidv4 } from "uuid";
 import axios from "axios";
 import { all, get, run } from "./db.js";
 import crypto from "crypto";
+import { fileURLToPath } from "url"; // ✅ __dirname 대체
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 
@@ -27,11 +31,11 @@ const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads")
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 app.use("/uploads", express.static(UPLOAD_DIR));
 
-// ---------- DB Migration (sms_extra_text 컬럼 자동 생성) ----------
+// ---------- DB Migration (sms_extra_text 자동) ----------
 (async () => {
   try {
     const cols = await all("PRAGMA table_info(policy)");
-    const hasCol = cols.some(c => c.name === "sms_extra_text");
+    const hasCol = cols.some((c) => c.name === "sms_extra_text");
     if (!hasCol) {
       await run("ALTER TABLE policy ADD COLUMN sms_extra_text TEXT");
       console.log("DB migrated: sms_extra_text column added to policy table");
@@ -133,8 +137,13 @@ app.get("/api/admin/policy", async (_req, res) =>
 );
 
 app.post("/api/admin/policy", async (req, res) => {
-  // ✅ sms_extra_text을 함께 저장
-  const { base_price, allowed_weekdays, start_date, end_date, sms_extra_text } = req.body || {};
+  const {
+    base_price,
+    allowed_weekdays,
+    start_date,
+    end_date,
+    sms_extra_text,
+  } = req.body || {};
   await run(
     "UPDATE policy SET base_price=?, allowed_weekdays=?, start_date=?, end_date=?, sms_extra_text=? WHERE id=1",
     [base_price, allowed_weekdays, start_date, end_date, sms_extra_text ?? null]
@@ -149,12 +158,18 @@ app.post("/api/admin/student-policy/:id", async (req, res) => {
     req.body || {};
   await run(
     "UPDATE students SET allowed_weekdays=?, start_date=?, end_date=?, price_override=? WHERE id=?",
-    [allowed_weekdays || null, start_date || null, end_date || null, price_override || null, id]
+    [
+      allowed_weekdays || null,
+      start_date || null,
+      end_date || null,
+      price_override || null,
+      id,
+    ]
   );
   res.json({ ok: true });
 });
 
-// ---------- Blackout (No-Service Days) ----------
+// ---------- Blackout ----------
 app.get("/api/admin/no-service-days", async (_req, res) => {
   const rows = await all("SELECT * FROM blackout ORDER BY date, slot");
   res.json(rows);
@@ -172,7 +187,7 @@ app.delete("/api/admin/no-service-days/:id", async (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- Active Policy for Student (Student Page) ----------
+// ---------- Active Policy (Student Page) ----------
 app.get("/api/policy/active", async (req, res) => {
   const code = req.query.code;
   if (!code) return res.status(400).json({ error: "code required" });
@@ -182,30 +197,35 @@ app.get("/api/policy/active", async (req, res) => {
 
   const g = await get("SELECT * FROM policy WHERE id=1");
 
-  // --- 허용 요일: 학생 설정이 있으면 그걸 그대로 사용, 없으면 전역 사용
   const rawAllowed =
     (s.allowed_weekdays && s.allowed_weekdays.trim()) ||
     (g.allowed_weekdays || "");
   const allowed = new Set(
     rawAllowed
       .split(",")
-      .map(v => v.trim())
+      .map((v) => v.trim())
       .filter(Boolean)
   );
 
-  // --- 기간: 전역/학생이 모두 있으면 '교집합' 사용, 한쪽만 있으면 그 값 사용
   const toDate = (v) => (v ? new Date(v) : null);
   const gStart = toDate(g.start_date);
   const gEnd = toDate(g.end_date);
   const sStart = toDate(s.start_date);
   const sEnd = toDate(s.end_date);
 
-  // 교집합 계산
-  const effStart = [gStart, sStart].filter(Boolean).reduce((a, b) => (a && b ? (a > b ? a : b) : (a || b)), null);
-  const effEnd   = [gEnd,   sEnd  ].filter(Boolean).reduce((a, b) => (a && b ? (a < b ? a : b) : (a || b)), null);
+  const effStart = [gStart, sStart]
+    .filter(Boolean)
+    .reduce((a, b) => (a && b ? (a > b ? a : b) : a || b), null);
+  const effEnd = [gEnd, sEnd]
+    .filter(Boolean)
+    .reduce((a, b) => (a && b ? (a < b ? a : b) : a || b), null);
 
-  const start_date = effStart ? dayjs(effStart).format("YYYY-MM-DD") : (g.start_date || s.start_date || null);
-  const end_date   = effEnd   ? dayjs(effEnd).format("YYYY-MM-DD")   : (g.end_date   || s.end_date   || null);
+  const start_date = effStart
+    ? dayjs(effStart).format("YYYY-MM-DD")
+    : g.start_date || s.start_date || null;
+  const end_date = effEnd
+    ? dayjs(effEnd).format("YYYY-MM-DD")
+    : g.end_date || s.end_date || null;
 
   const bl = await all("SELECT * FROM blackout");
   res.json({
@@ -268,13 +288,12 @@ app.post("/api/payments/toss/confirm", async (req, res) => {
   }
 });
 
-// ---------- Weekly Summary (Admin) ----------
+// ---------- Weekly Summary ----------
 app.get("/api/admin/weekly-summary", async (req, res) => {
   const { start, end } = req.query;
   if (!start || !end)
     return res.status(400).json({ error: "start and end required" });
 
-  // 기간의 날짜 리스트(포함)
   const days = [];
   let cur = dayjs(start);
   const endD = dayjs(end);
@@ -289,16 +308,15 @@ app.get("/api/admin/weekly-summary", async (req, res) => {
     [start, end]
   );
 
-  // 학생별/날짜별/슬롯별 조회 빠르게 하기 위한 맵
   const hasMap = new Map();
-  orders.forEach(o => {
+  orders.forEach((o) => {
     hasMap.set(`${o.student_id}|${o.date}|${o.slot}`, true);
   });
 
-  const rows = students.map(s => {
+  const rows = students.map((s) => {
     const byDate = {};
     let count = 0;
-    days.forEach(d => {
+    days.forEach((d) => {
       const lunch = !!hasMap.get(`${s.id}|${d}|LUNCH`);
       const dinner = !!hasMap.get(`${s.id}|${d}|DINNER`);
       if (lunch) count++;
@@ -308,15 +326,23 @@ app.get("/api/admin/weekly-summary", async (req, res) => {
     return { id: s.id, name: s.name, code: s.code, count, byDate };
   });
 
-  const applied = rows.filter(r => r.count > 0).map(r => ({
-    id: r.id, name: r.name, code: r.code,
-    count: r.count,
-    items: days.flatMap(d => ([
-      r.byDate[d].LUNCH ? { date: d, slot: 'LUNCH' } : null,
-      r.byDate[d].DINNER ? { date: d, slot: 'DINNER' } : null,
-    ].filter(Boolean)))
-  }));
-  const notApplied = rows.filter(r => r.count === 0).map(({id,name,code})=>({id,name,code}));
+  const applied = rows
+    .filter((r) => r.count > 0)
+    .map((r) => ({
+      id: r.id,
+      name: r.name,
+      code: r.code,
+      count: r.count,
+      items: days.flatMap((d) =>
+        [
+          r.byDate[d].LUNCH ? { date: d, slot: "LUNCH" } : null,
+          r.byDate[d].DINNER ? { date: d, slot: "DINNER" } : null,
+        ].filter(Boolean)
+      ),
+    }));
+  const notApplied = rows
+    .filter((r) => r.count === 0)
+    .map(({ id, name, code }) => ({ id, name, code }));
 
   res.json({ start, end, days, rows, applied, notApplied });
 });
@@ -394,9 +420,7 @@ app.get("/api/admin/menu-images", async (_req, res) => {
 });
 
 app.delete("/api/admin/menu-images/:id", async (req, res) => {
-  const row = await get("SELECT * FROM menu_images WHERE id=?", [
-    req.params.id,
-  ]);
+  const row = await get("SELECT * FROM menu_images WHERE id=?", [req.params.id]);
   if (row) {
     const filepath = path.join(UPLOAD_DIR, path.basename(row.url));
     try {
@@ -479,6 +503,26 @@ app.post("/api/sms/summary", async (req, res) => {
   }
 });
 
+// ---------- ✅ 정적 파일 서빙 & SPA 폴백 (API 뒤에 위치해야 함) ----------
+const PUBLIC_DIR = path.join(__dirname, "public");
+console.log("[STATIC] PUBLIC_DIR =", PUBLIC_DIR);
+console.log("[STATIC] exists(public)     =", fs.existsSync(PUBLIC_DIR));
+console.log("[STATIC] exists(index.html) =", fs.existsSync(path.join(PUBLIC_DIR, "index.html")));
+
+app.use(express.static(PUBLIC_DIR));
+
+app.get("/", (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, "index.html"));
+});
+
+app.get("*", (req, res, next) => {
+  if (req.path.startsWith("/api")) return next();
+  res.sendFile(path.join(PUBLIC_DIR, "index.html"));
+});
+
 // ---------- Start Server ----------
 const port = process.env.PORT || 5000;
+console.log("Starting server, PORT =", port);
+console.log("Serving static from:", PUBLIC_DIR);
+
 app.listen(port, () => console.log("Server started on port", port));
