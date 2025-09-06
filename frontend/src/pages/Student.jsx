@@ -6,6 +6,7 @@ const slots = ['LUNCH','DINNER'];
 const slotKo = { LUNCH:'점심', DINNER:'저녁' };
 function ymd(dt){ const p=n=>String(n).padStart(2,'0'); return `${dt.getFullYear()}-${p(dt.getMonth()+1)}-${p(dt.getDate())}`; }
 function addDays(d,i){ const x=new Date(d); x.setDate(x.getDate()+i); return x; }
+function fmtMD(dateStr){ const d=new Date(dateStr); if (isNaN(d)) return dateStr; return `${d.getMonth()+1}/${d.getDate()}`; } // 8/22
 
 function genDates(startStr, endStr){
   const out=[];
@@ -30,10 +31,10 @@ export default function Student(){
 
   const [selected, setSelected] = useState({});
   const [phone, setPhone] = useState('01022223333');
-  const [smsPreview, setSmsPreview] = useState(null); // string or null
+  const [smsPreview, setSmsPreview] = useState(null);
   const [smsSent, setSmsSent] = useState(false);
   const [showSmsRequire, setShowSmsRequire] = useState(false);
-  const [overrideEnableAll, setOverrideEnableAll] = useState(false); // 유지(삭제하지 않음)
+  const [overrideEnableAll, setOverrideEnableAll] = useState(false);
 
   const allowed = useMemo(()=> new Set(policy?.allowed_weekdays||[]),[policy]);
   const nosvc = useMemo(()=>{
@@ -85,7 +86,6 @@ export default function Student(){
     alert('선택 저장 완료');
   }
 
-  // ✅ 보강된 결제 함수 (TossPayments)
   async function pay(method='카드'){
     if(items.length===0) return alert('선택이 없습니다');
     if(!smsSent){ setShowSmsRequire(true); return; }
@@ -96,22 +96,18 @@ export default function Student(){
       items.map(x=>`${x.date} ${slotKo[x.slot]}`).slice(0,3).join(', ')
       + (items.length>3?` 외 ${items.length-3}건`:'');
 
-    // .env (Vite)에서 클라이언트 키 읽기. 없으면 테스트키 fallback
     const ck = (import.meta?.env?.VITE_TOSS_CLIENT_KEY) || 'test_ck_xxx';
-
     if(!window.TossPayments){
       alert('결제 SDK가 로드되지 않았습니다. 페이지를 새로고침 후 다시 시도해주세요.');
       return;
     }
     const toss = window.TossPayments(ck);
 
-    // 성공/실패 페이지로 전달할 쿼리스트링
     const qs = new URLSearchParams({
       amount: String(amount),
       orderId,
       orderName,
       code,
-      // 성공 페이지에서 decode → JSON.parse 하도록 동일 포맷 유지
       items: encodeURIComponent(JSON.stringify(items))
     }).toString();
 
@@ -124,47 +120,61 @@ export default function Student(){
         failUrl: `${window.location.origin}/payment/fail?${qs}`
       });
     } catch(e){
-      // 사용자가 창 닫거나 결제 취소한 경우: 조용히 반환
       if(e && (e.code === 'USER_CANCEL' || e.message?.includes('User cancelled'))) return;
       alert('결제 시작에 실패했습니다\n' + (e?.message || String(e)));
     }
   }
 
+  // 문자 전송(신규 포맷 미리보기 유지)
   async function sms(){
-    // group by date for cleaner SMS
-    const grouped = items.reduce((acc, it) => {
-      (acc[it.date] = acc[it.date] || []).push(it);
-      return acc;
-    }, {});
-    const lines = Object.entries(grouped).map(([date, arr]) => {
-      const wd = weekdaysKo[new Date(date).getDay()];
-      const labels = arr.map(x=>slotKo[x.slot]).sort().join(', ');
-      const perDayTotal = arr.reduce((s,x)=> s + (x.price||0), 0);
-      return `${date} ${wd} ${labels}  ${perDayTotal.toLocaleString()}원`;
-    });
-    const msg = `[도시락 신청 내역]\n` + (name?`${name} 학생\n`:'') + lines.join('\n') + `\n합계 ${total.toLocaleString()}원`;
-    setSmsPreview(msg); // open modal
+    if(items.length===0) { alert('선택이 없습니다'); return; }
+
+    const grouped = items.reduce((acc, it) => { (acc[it.date] = acc[it.date] || []).push(it); return acc; }, {});
+    const orderedDates = Object.keys(grouped).sort();
+    const periodText = orderedDates.length
+      ? (fmtMD(orderedDates[0]) + (orderedDates[0] === orderedDates[orderedDates.length - 1] ? '' : `~${fmtMD(orderedDates[orderedDates.length - 1])}`))
+      : '-';
+    const totalCount = items.length;
+    const lines = orderedDates.map(d => {
+      const wd = weekdaysKo[new Date(d).getDay()];
+      const labels = grouped[d].map(x=>slotKo[x.slot]).sort().join(', ');
+      return `${fmtMD(d)}(${wd}) ${labels}`;
+    }).join('\n');
+
+    const studentName = (name || policy?.student?.name || '').trim();
+    const memo = (policy?.sms_extra_text || '').trim();
+    let previewMsg =
+      `[메디컬로드맵 도시락 신청]\n\n` +
+      `※ ${studentName}학생\n` +
+      `- 기간: ${periodText}\n` +
+      `- 식수: ${totalCount}식\n` +
+      `- 비용: ${total.toLocaleString()}원`;
+    if(memo){ previewMsg += `\n\n※ 입금 계좌\n${memo}`; }
+    previewMsg += `\n\n※ 신청내역\n${lines || '-'}`;
+    setSmsPreview(previewMsg);
     setSmsSent(true);
-    if(phone && phone.trim().length>=10){
-      try{
-        await api.post('/sms/summary', { to: phone.trim(), code, items, total, name });
-      }catch(e){
-        // ignore error; preview already shown
-        console.error('SMS send failed', e?.response?.data||String(e));
-      }
+
+    const to = (phone||'').trim();
+    if(!to || to.length < 9){ alert('전화번호를 정확히 입력해 주세요.'); return; }
+    try{
+      await api.post('/sms/summary', { to, code, items, total, name });
+      alert('입력하신 번호로 문자가 전송되었습니다.');
+    }catch(e){
+      console.error('SMS send failed', e?.response?.data||String(e));
+      alert('문자 전송에 실패했습니다. 잠시 후 다시 시도해 주세요.');
     }
   }
 
   function resetSelections(){
     setSelected({});
-    setOverrideEnableAll(false); // 더 이상 활성화 용도로 사용하지 않음
+    setOverrideEnableAll(false);
     setSmsSent(false);
     alert('선택이 초기화되었습니다.');
   }
 
   return (
     <div className="grid grid-student lg:grid-cols-2 gap-6">
-      {/* Left: entry & large image */}
+      {/* Left */}
       <section className="card p-5">
         <h2 className="text-xl font-bold mb-3">학생 입장</h2>
         <div className="flex gap-2 flex-col sm:flex-row">
@@ -193,13 +203,22 @@ export default function Student(){
               <div className="text-sm text-slate-500">선택 후 우측에서 요약/결제 확인</div>
               <button className="btn-ghost" onClick={resetSelections}>선택 리셋</button>
             </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {weekDates.map(d=>{
                 const wd = new Date(d).getDay();
                 const wdCode=['SUN','MON','TUE','WED','THU','FRI','SAT'][wd];
-                const disableDay = !allowed.has(wdCode); // 전역/학생 허용 요일 이외는 비활성
+
+                // ✅ 카드 자체를 숨기는 로직
+                const allowedDay = allowed.has(wdCode);
+                const blockedBoth =
+                  nosvc.get(`${d}-BOTH`) ||
+                  (nosvc.get(`${d}-LUNCH`) && nosvc.get(`${d}-DINNER`));
+
+                if (!allowedDay || blockedBoth) return null; // 아예 렌더링하지 않음
+
                 return (
-                  <div key={d} className={"rounded-2xl border p-4 shadow-sm " + (disableDay ? "opacity-50" : "bg-white")}>
+                  <div key={d} className="rounded-2xl border p-4 shadow-sm bg-white">
                     <div className="flex items-center justify-between mb-2">
                       <div className="font-semibold">{d}</div>
                       <div className="text-sm text-slate-500">{weekdaysKo[wd]}</div>
@@ -208,9 +227,9 @@ export default function Student(){
                     <div className="grid grid-cols-2 gap-2 mt-1">
                       {slots.map(slot=>{
                         const key = `${d}-${slot}`;
-                        const isNo = nosvc.get(`${d}-BOTH`) || nosvc.get(key); // 미제공일(BOTH/개별) 체크
                         const sel = !!items.find(x=>x.date===d && x.slot===slot);
-                        const disabled = (disableDay || isNo); // reset과 무관하게 항상 비활성 조건 유지
+                        // 슬롯 개별 블랙아웃만 비활성(카드 사라지는 조건과 별개)
+                        const disabled = !!nosvc.get(key);
                         return (
                           <button
                             key={slot}
@@ -220,17 +239,13 @@ export default function Student(){
                               ${disabled ? 'opacity-40 cursor-not-allowed' : ''}
                             `}
                             disabled={disabled}
-                            title={disabled ? '미진행' : slotKo[slot]}
+                            title={disabled ? '신청 불가' : slotKo[slot]}
                           >
                             {slotKo[slot]}
                           </button>
                         );
                       })}
                     </div>
-
-                    {(nosvc.get(`${d}-BOTH`) || disableDay) && (
-                      <div className="mt-2 text-xs text-rose-500/80">신청 불가</div>
-                    )}
                   </div>
                 );
               })}
@@ -243,7 +258,6 @@ export default function Student(){
       <aside className="card p-5 lg:col-span-2 h-max">
         <h2 className="text-xl font-bold mb-3">결제 요약</h2>
         {(() => {
-          // Group items by date
           const groups = items.reduce((acc, it) => {
             (acc[it.date] = acc[it.date] || []).push(it);
             return acc;
@@ -274,8 +288,6 @@ export default function Student(){
               <div className="mt-4 flex flex-col gap-2">
                 <button className="btn-primary" onClick={commit}>선택 저장</button>
                 <div className="grid grid-cols-2 gap-2">
-                  <button className="btn-ghost" onClick={()=>pay('카드')}>카드</button>
-                  <button className="btn-ghost" onClick={()=>pay('카카오페이')}>카카오페이</button>
                 </div>
 
                 <div className="flex gap-2">

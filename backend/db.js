@@ -11,7 +11,7 @@ let SQL = null;
 let db = null;
 
 /**
- * DB 핸들 가져오기 (초기화 및 스키마 부트스트랩)
+ * DB 핸들 가져오기 (초기화 및 스키마/마이그레이션)
  */
 export async function getDB() {
   if (db) return db;
@@ -23,9 +23,12 @@ export async function getDB() {
   if (fs.existsSync(DB_PATH)) {
     const buf = fs.readFileSync(DB_PATH);
     db = new SQL.Database(new Uint8Array(buf));
+    // 기존 파일도 마이그레이션 적용
+    await runMigrations();
+    await persist(); // 마이그레이션 반영
   } else {
     db = new SQL.Database();
-    bootstrap();
+    bootstrap();     // 신규 스키마
     await persist();
   }
 
@@ -44,6 +47,7 @@ export async function persist() {
 /**
  * 초기에 필요한 테이블/인덱스 생성
  * - students, policy, menu_images, orders, blackout
+ * - policy에는 sms_extra_text 기본 포함
  */
 function bootstrap() {
   db.run(`
@@ -68,7 +72,8 @@ function bootstrap() {
       base_price INTEGER DEFAULT 9000,
       allowed_weekdays TEXT DEFAULT 'MON,TUE,WED,THU,FRI',
       start_date TEXT,
-      end_date TEXT
+      end_date TEXT,
+      sms_extra_text TEXT
     );
     INSERT OR IGNORE INTO policy(id, base_price, allowed_weekdays)
     VALUES (1, 9000, 'MON,TUE,WED,THU,FRI');
@@ -103,6 +108,21 @@ function bootstrap() {
       slot TEXT NOT NULL          -- 'BOTH' | 'LUNCH' | 'DINNER'
     );
   `);
+}
+
+/**
+ * 마이그레이션:
+ * - policy.sms_extra_text 없으면 추가
+ */
+async function runMigrations() {
+  // table_info(policy) 조회
+  const cols = await all("PRAGMA table_info(policy)");
+  const hasSmsExtra = cols.some((c) => c.name === "sms_extra_text");
+
+  if (!hasSmsExtra) {
+    // sql.js도 ALTER TABLE ADD COLUMN 지원
+    db.run(`ALTER TABLE policy ADD COLUMN sms_extra_text TEXT;`);
+  }
 }
 
 /**

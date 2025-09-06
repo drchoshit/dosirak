@@ -10,12 +10,15 @@ import { v4 as uuidv4 } from "uuid";
 import axios from "axios";
 import { all, get, run } from "./db.js";
 import crypto from "crypto";
-import { fileURLToPath } from "url"; // ✅ __dirname 대체
+import cookieParser from "cookie-parser";
+import { fileURLToPath } from "url";
+import XLSX from "xlsx";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+const PORT = Number(process.env.PORT) || 5000;
 
 // ---------- App & Middlewares ----------
 app.use(express.json());
@@ -26,10 +29,67 @@ app.use(
   })
 );
 
-// Uploads: folder & static
+// ---------- Admin Auth (cookie) ----------
+const ADMIN_USER = process.env.ADMIN_USER || "medicalsoap";
+const ADMIN_PASS = process.env.ADMIN_PASS || "ghfkdskql2827";
+const ADMIN_SECRET =
+  process.env.ADMIN_SECRET ||
+  "please-change-this-admin-cookie-secret-very-long";
+const ADMIN_COOKIE_NAME = "admintoken";
+const IS_PROD = process.env.NODE_ENV === "production";
+
+app.use(cookieParser(ADMIN_SECRET));
+
+app.post("/api/admin/login", (req, res) => {
+  const { username, password } = req.body || {};
+  if (username !== ADMIN_USER || password !== ADMIN_PASS) {
+    return res.status(401).json({ ok: false, error: "INVALID_CREDENTIALS" });
+  }
+  res.cookie(ADMIN_COOKIE_NAME, "1", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: IS_PROD,
+    signed: true,
+    path: "/",
+    maxAge: 1000 * 60 * 60 * 24 * 7,
+  });
+  return res.json({ ok: true });
+});
+
+app.get("/api/admin/me", (req, res) => {
+  const token = req.signedCookies?.[ADMIN_COOKIE_NAME];
+  return res.json({ authenticated: token === "1" });
+});
+
+app.post("/api/admin/logout", (req, res) => {
+  res.clearCookie(ADMIN_COOKIE_NAME, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: IS_PROD,
+    signed: true,
+    path: "/",
+  });
+  return res.json({ ok: true });
+});
+
+function adminAuth(req, res, next) {
+  const open = ["/login", "/me", "/logout"];
+  if (open.includes(req.path)) return next();
+  const token = req.signedCookies?.[ADMIN_COOKIE_NAME];
+  if (token === "1") return next();
+  return res.status(401).json({ error: "UNAUTHORIZED" });
+}
+app.use("/api/admin", adminAuth);
+
+// Uploads
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 app.use("/uploads", express.static(UPLOAD_DIR));
+
+// temp for excel
+const TMP_DIR = path.join(UPLOAD_DIR, "tmp");
+fs.mkdirSync(TMP_DIR, { recursive: true });
+const uploadExcel = multer({ dest: TMP_DIR });
 
 // ---------- DB Migration (sms_extra_text 자동) ----------
 (async () => {
@@ -48,7 +108,89 @@ app.use("/uploads", express.static(UPLOAD_DIR));
 // Health
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
+// ---------- Helpers for Excel header/phone ----------
+const onlyDigits = (s = "") => String(s).replace(/\D/g, "");
+
+function normalizePhone(raw = "") {
+  const digits = onlyDigits(raw);
+  if (digits.length === 11 && digits.startsWith("010")) {
+    return `${digits.slice(0, 3)}-${digits.slice(3, 7)}-${digits.slice(7)}`;
+  }
+  if (digits.length === 10) {
+    return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+  }
+  return String(raw || "");
+}
+
+function headerKey(h) {
+  const s = String(h).trim().toLowerCase();
+
+  if (/(^|[^가-힣a-z])이름([^가-힣a-z]|$)/.test(s) || /(^|_)name($|_)/.test(s))
+    return "name";
+
+  if (/(^|[^가-힣a-z])코드([^가-힣a-z]|$)/.test(s) || /(code|id)\b/.test(s))
+    return "code";
+
+  if (/학생.?연락/.test(s) || /(student.*(phone|tel)|phone_student|학생전화)/.test(s))
+    return "studentPhone";
+
+  if (/(학부모|보호자).?연락/.test(s) || /(parent.*(phone|tel)|phone_parent|보호자전화)/.test(s))
+    return "parentPhone";
+
+  return null;
+}
+
+/**
+ * 엑셀 버퍼를 받아 학생 목록으로 변환
+ * - 헤더가 1행이 아닐 수 있으므로, 상단 30행을 스캔해 실제 헤더를 자동 탐지
+ * - 반환: [{ name, code, studentPhone, parentPhone }]
+ */
+function parseExcelBufferToStudents(buf) {
+  const wb = XLSX.read(buf, { type: "buffer" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  // 2차원 배열로 읽기 (header:1)
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+
+  if (!rows.length) return [];
+
+  // 실제 헤더 행 찾기: 의미 있는 키가 2개 이상인 첫 번째 행
+  let headerIdx = -1;
+  let headerKeys = [];
+  for (let i = 0; i < Math.min(rows.length, 30); i++) {
+    const ks = rows[i].map(headerKey);
+    const score = ks.filter(Boolean).length;
+    if (score >= 2 && (ks.includes("name") || ks.includes("code"))) {
+      headerIdx = i;
+      headerKeys = ks;
+      break;
+    }
+  }
+  if (headerIdx < 0) {
+    headerIdx = 0;
+    headerKeys = rows[0].map(headerKey);
+  }
+
+  const out = [];
+  for (let r = headerIdx + 1; r < rows.length; r++) {
+    const row = rows[r] || [];
+    const obj = { name: "", code: "", studentPhone: "", parentPhone: "" };
+    for (let c = 0; c < Math.max(headerKeys.length, row.length); c++) {
+      const k = headerKeys[c];
+      if (!k) continue;
+      let v = row[c];
+      if (k === "studentPhone" || k === "parentPhone") v = normalizePhone(v);
+      obj[k] = String(v ?? "").trim();
+    }
+    // 공백 행 제거
+    if (obj.name || obj.code || obj.studentPhone || obj.parentPhone) {
+      out.push(obj);
+    }
+  }
+  return out;
+}
+
 // ---------- Students: import/export & CRUD ----------
+// CSV import (기존 유지)
 app.post(
   "/api/admin/students/import",
   express.text({ type: "text/csv" }),
@@ -82,11 +224,145 @@ app.post(
   }
 );
 
+// ✅ EXCEL preview: DB에 기록하지 않고 파싱만 해서 반환 (UI 채우기용)
+app.post(
+  "/api/admin/students/preview-excel",
+  uploadExcel.single("file"),
+  async (req, res) => {
+    try {
+      if (!req.file)
+        return res.status(400).json({ ok: false, error: "FILE_REQUIRED" });
+
+      const buf = fs.readFileSync(req.file.path);
+      const students = parseExcelBufferToStudents(buf);
+      fs.unlink(req.file.path, () => {});
+      return res.json({ ok: true, students });
+    } catch (e) {
+      console.error(e);
+      return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  }
+);
+
+// ✅ EXCEL import: "추가만" (이름+코드 완전 일치 → 스킵, 새 학생만 추가)
+app.post(
+  "/api/admin/students/import-excel",
+  uploadExcel.single("file"),
+  async (req, res) => {
+    try {
+      if (!req.file)
+        return res.status(400).json({ ok: false, error: "FILE_REQUIRED" });
+
+      const buf = fs.readFileSync(req.file.path);
+      const parsed = parseExcelBufferToStudents(buf);
+
+      // 현재 학생들 캐시
+      const existing = await all("SELECT name, code FROM students");
+      const byCode = new Map(
+        existing.map((s) => [
+          String(s.code || "").trim(),
+          { name: String(s.name || "").trim() },
+        ])
+      );
+      const byNameCode = new Set(
+        existing.map(
+          (s) => `${String(s.name || "").trim()}|${String(s.code || "").trim()}`
+        )
+      );
+
+      let imported = 0;
+      const skipped_existing = []; // 이름+코드 일치
+      const skipped_code_conflict = []; // 코드 동일, 이름 다름
+
+      for (const r of parsed) {
+        const name = String(r.name || "").trim();
+        const code = String(r.code || "").trim();
+        const phone = String(r.studentPhone || "").trim();
+        const parent_phone = String(r.parentPhone || "").trim();
+        if (!name || !code) continue;
+
+        const key = `${name}|${code}`;
+
+        // 1) 이름+코드가 완전히 같으면 스킵
+        if (byNameCode.has(key)) {
+          skipped_existing.push({ name, code });
+          continue;
+        }
+
+        // 2) 코드가 이미 있는데 이름이 다르면 충돌
+        const prev = byCode.get(code);
+        if (prev && prev.name && prev.name !== name) {
+          skipped_code_conflict.push({ name, code, exists_as: prev.name });
+          continue;
+        }
+
+        // 3) 신규 추가
+        await run(
+          "INSERT INTO students(name, code, phone, parent_phone) VALUES(?,?,?,?)",
+          [name, code, phone, parent_phone]
+        );
+        imported++;
+
+        // 캐시 갱신
+        byCode.set(code, { name });
+        byNameCode.add(key);
+      }
+
+      fs.unlink(req.file.path, () => {});
+      return res.json({
+        ok: true,
+        imported,
+        skipped_existing,
+        skipped_code_conflict,
+      });
+    } catch (e) {
+      console.error(e);
+      return res
+        .status(500)
+        .json({ ok: false, error: String(e?.message || e) });
+    }
+  }
+);
+
+// ✅ EXCEL export: 사용자 포맷(ID, 이름, 학년, 학생전화, 보호자전화)
+app.get("/api/admin/students/export-excel", async (_req, res) => {
+  try {
+    const rows = await all(
+      "SELECT name, code, phone, parent_phone FROM students ORDER BY name"
+    );
+    const data = rows.map((r) => ({
+      ID: r.code, // 코드 = ID
+      이름: r.name,
+      학년: "", // DB에 없으므로 공란
+      학생전화: r.phone || "",
+      보호자전화: r.parent_phone || "",
+    }));
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(data);
+    XLSX.utils.book_append_sheet(wb, ws, "학생DB");
+
+    const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="students.xlsx"`
+    );
+    return res.send(buf);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 app.get("/api/admin/students", async (_req, res) =>
   res.json(await all("SELECT * FROM students ORDER BY name"))
 );
 
-// Students CRUD
+// CRUD
 app.post("/api/admin/students", async (req, res) => {
   const { name, code, phone, parent_phone } = req.body || {};
   await run(
@@ -112,7 +388,7 @@ app.delete("/api/admin/students/:id", async (req, res) => {
   res.json({ ok: true });
 });
 
-// Export CSV
+// CSV export (기존 유지)
 app.get("/api/admin/students/export", async (_req, res) => {
   const rows = await all(
     "SELECT name, code, phone, parent_phone FROM students ORDER BY name"
@@ -256,7 +532,7 @@ app.post("/api/orders/commit", async (req, res) => {
 
 app.post("/api/payments/toss/confirm", async (req, res) => {
   const { paymentKey, orderId, amount, code, dateslots } = req.body || {};
-  if (!paymentKey || !orderId || !amount)
+  if (!paymentKey || !amount || !orderId)
     return res.status(400).json({ error: "missing fields" });
   try {
     const secretKey = process.env.TOSS_SECRET_KEY || "";
@@ -282,9 +558,10 @@ app.post("/api/payments/toss/confirm", async (req, res) => {
     }
     res.json({ ok: true, receipt: resp.data });
   } catch (e) {
-    res
-      .status(400)
-      .json({ error: "confirm_failed", detail: e?.response?.data || String(e) });
+    res.status(400).json({
+      error: "confirm_failed",
+      detail: e?.response?.data || String(e),
+    });
   }
 });
 
@@ -302,7 +579,9 @@ app.get("/api/admin/weekly-summary", async (req, res) => {
     cur = cur.add(1, "day");
   }
 
-  const students = await all("SELECT id, name, code FROM students ORDER BY name");
+  const students = await all(
+    "SELECT id, name, code FROM students ORDER BY name"
+  );
   const orders = await all(
     "SELECT student_id, date, slot FROM orders WHERE status='SELECTED' AND date BETWEEN ? AND ?",
     [start, end]
@@ -432,11 +711,11 @@ app.delete("/api/admin/menu-images/:id", async (req, res) => {
 });
 
 // ---------- SMS ----------
-const onlyDigits = (s = "") => String(s).replace(/\D/g, "");
 function createSolapiAuthHeader(apiKey, apiSecret) {
   const date = new Date().toISOString();
   const salt = crypto.randomBytes(16).toString("hex");
-  const signature = crypto.createHmac("sha256", apiSecret)
+  const signature = crypto
+    .createHmac("sha256", apiSecret)
     .update(date + salt)
     .digest("hex");
   return `HMAC-SHA256 apiKey=${apiKey}, date=${date}, salt=${salt}, signature=${signature}`;
@@ -450,30 +729,84 @@ app.post("/api/sms/summary", async (req, res) => {
     }
 
     const s = await get("SELECT * FROM students WHERE code=?", [code]);
-    if (!s) return res.status(404).json({ ok: false, error: "student not found" });
+    if (!s)
+      return res.status(404).json({ ok: false, error: "student not found" });
 
     const g = await get("SELECT sms_extra_text FROM policy WHERE id=1");
     const policyExtra = (g?.sms_extra_text ?? "").toString().trim();
 
     const dest = onlyDigits(to);
     const sender = onlyDigits(process.env.COOLSMS_SENDER || "");
-    if (!sender) return res.status(400).json({ ok: false, error: "MISSING_SENDER" });
-    if (dest.length < 9) return res.status(400).json({ ok: false, error: "INVALID_TO_NUMBER" });
+    if (!sender)
+      return res.status(400).json({ ok: false, error: "MISSING_SENDER" });
+    if (dest.length < 9)
+      return res
+        .status(400)
+        .json({ ok: false, error: "INVALID_TO_NUMBER" });
 
-    const lines = (items || [])
-      .map((it) => `${it.date} ${it.slot === "LUNCH" ? "점심" : "저녁"}`)
-      .join(", ");
+    // 집계
+    const uniq = new Map();
+    for (const it of items || []) {
+      if (!it?.date) continue;
+      const slot = String(it.slot || "").toUpperCase();
+      if (slot !== "LUNCH" && slot !== "DINNER") continue;
+      uniq.set(`${it.date}|${slot}`, { date: it.date, slot });
+    }
+    const uniqItems = Array.from(uniq.values());
+    const totalCount = uniqItems.length;
 
+    const clientTotal = Number.isFinite(Number(total)) ? Number(total) : null;
+    const computedTotal = items.reduce(
+      (sum, it) => sum + (Number(it.price) || 0),
+      0
+    );
+    const totalAmount = clientTotal ?? computedTotal ?? 0;
+
+    const byDate = new Map();
+    for (const { date, slot } of uniqItems) {
+      if (!byDate.has(date)) byDate.set(date, new Set());
+      byDate.get(date).add(slot);
+    }
+    const orderedDates = Array.from(byDate.keys()).sort();
+
+    const fmtMD = (dstr) => {
+      const d = dayjs(dstr);
+      if (!d.isValid()) return dstr;
+      return `${d.month() + 1}/${d.date()}`;
+    };
+    let periodText = "-";
+    if (orderedDates.length >= 1) {
+      const from = orderedDates[0];
+      const toDate = orderedDates[orderedDates.length - 1];
+      periodText = fmtMD(from) + (from === toDate ? "" : `~${fmtMD(toDate)}`);
+    }
+
+    const koWeek = ["일", "월", "화", "수", "목", "금", "토"];
+    const lines = orderedDates
+      .map((d) => {
+        const wd = koWeek[dayjs(d).day()];
+        const set = byDate.get(d) || new Set();
+        const parts = [];
+        if (set.has("LUNCH")) parts.push("점심");
+        if (set.has("DINNER")) parts.push("저녁");
+        return `${fmtMD(d)}(${wd}) ${parts.join(", ")}`;
+      })
+      .join("\n");
+
+    const studentName = (name || s.name || "").trim();
     let text =
-      `[도시락 신청 결과]\n` +
-      `학생: ${name || s.name}\n` +
-      `내역: ${lines}\n` +
-      `합계: ${Number(total || 0).toLocaleString()}원`;
+      `[메디컬로드맵 도시락 신청]\n\n` +
+      `※ ${studentName}학생\n` +
+      `- 기간: ${periodText}\n` +
+      `- 식수: ${totalCount}식\n` +
+      `- 비용: ${Number(totalAmount || 0).toLocaleString()}원\n`;
 
     if (policyExtra) {
-      const clipped = policyExtra.slice(0, 500);
-      text += `\n\n※ 안내\n${clipped}`;
+      const clipped = policyExtra.slice(0, 700);
+      text += `\n\n※ 입금 계좌\n${clipped}\n`;
     }
+
+    text += `\n\n※ 신청내역\n${lines || "-"}`;
 
     const apiKey = process.env.COOLSMS_API_KEY;
     const apiSecret = process.env.COOLSMS_API_SECRET;
@@ -503,16 +836,17 @@ app.post("/api/sms/summary", async (req, res) => {
   }
 });
 
-// ---------- ✅ 정적 파일 서빙 & SPA 폴백 (API 뒤에 위치해야 함) ----------
+// ---------- Static / SPA ----------
 const PUBLIC_DIR = path.join(__dirname, "public");
 console.log("[STATIC] PUBLIC_DIR =", PUBLIC_DIR);
 console.log("[STATIC] exists(public)     =", fs.existsSync(PUBLIC_DIR));
-console.log("[STATIC] exists(index.html) =", fs.existsSync(path.join(PUBLIC_DIR, "index.html")));
+console.log(
+  "[STATIC] exists(index.html) =",
+  fs.existsSync(path.join(PUBLIC_DIR, "index.html"))
+);
 
-// 정적 파일 서빙
 app.use(express.static(PUBLIC_DIR));
 
-// SPA에서 직접 진입하는 경로들 명시 처리
 const SPA_ROUTES = ["/", "/admin", "/admin/print", "/payment/success", "/payment/fail"];
 SPA_ROUTES.forEach((routePath) => {
   app.get(routePath, (_req, res) => {
@@ -520,14 +854,11 @@ SPA_ROUTES.forEach((routePath) => {
   });
 });
 
-// 그 외에도 /api 로 시작하지 않는 모든 경로는 SPA 폴백
 app.get(/^\/(?!api\/).*/, (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, "index.html"));
 });
 
-// ---------- Start Server ----------
-const port = process.env.PORT || 5000;
-console.log("Starting server, PORT =", port);
+console.log("ENV.PORT =", process.env.PORT);
+console.log("Starting server, PORT =", PORT);
 console.log("Serving static from:", PUBLIC_DIR);
-
-app.listen(port, () => console.log("Server started on port", port));
+app.listen(PORT, "0.0.0.0", () => console.log("Server started on port", PORT));
