@@ -21,7 +21,7 @@ const app = express();
 const PORT = Number(process.env.PORT) || 5000;
 
 // ---------- App & Middlewares ----------
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 app.use(
   cors({
     origin: process.env.CORS_ORIGIN?.split(",") || true,
@@ -141,19 +141,14 @@ function headerKey(h) {
 }
 
 /**
- * 엑셀 버퍼를 받아 학생 목록으로 변환
- * - 헤더가 1행이 아닐 수 있으므로, 상단 30행을 스캔해 실제 헤더를 자동 탐지
- * - 반환: [{ name, code, studentPhone, parentPhone }]
+ * 엑셀 버퍼를 받아 학생 목록으로 변환(헤더 자동 탐지)
  */
 function parseExcelBufferToStudents(buf) {
   const wb = XLSX.read(buf, { type: "buffer" });
   const ws = wb.Sheets[wb.SheetNames[0]];
-  // 2차원 배열로 읽기 (header:1)
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
-
   if (!rows.length) return [];
 
-  // 실제 헤더 행 찾기: 의미 있는 키가 2개 이상인 첫 번째 행
   let headerIdx = -1;
   let headerKeys = [];
   for (let i = 0; i < Math.min(rows.length, 30); i++) {
@@ -181,10 +176,7 @@ function parseExcelBufferToStudents(buf) {
       if (k === "studentPhone" || k === "parentPhone") v = normalizePhone(v);
       obj[k] = String(v ?? "").trim();
     }
-    // 공백 행 제거
-    if (obj.name || obj.code || obj.studentPhone || obj.parentPhone) {
-      out.push(obj);
-    }
+    if (obj.name || obj.code || obj.studentPhone || obj.parentPhone) out.push(obj);
   }
   return out;
 }
@@ -224,7 +216,7 @@ app.post(
   }
 );
 
-// ✅ EXCEL preview: DB에 기록하지 않고 파싱만 해서 반환 (UI 채우기용)
+// 엑셀 미리보기(파싱만)
 app.post(
   "/api/admin/students/preview-excel",
   uploadExcel.single("file"),
@@ -232,7 +224,6 @@ app.post(
     try {
       if (!req.file)
         return res.status(400).json({ ok: false, error: "FILE_REQUIRED" });
-
       const buf = fs.readFileSync(req.file.path);
       const students = parseExcelBufferToStudents(buf);
       fs.unlink(req.file.path, () => {});
@@ -244,7 +235,7 @@ app.post(
   }
 );
 
-// ✅ EXCEL import: "추가만" (이름+코드 완전 일치 → 스킵, 새 학생만 추가)
+// 엑셀 → DB 추가(신규만) (기존 유지)
 app.post(
   "/api/admin/students/import-excel",
   uploadExcel.single("file"),
@@ -256,7 +247,6 @@ app.post(
       const buf = fs.readFileSync(req.file.path);
       const parsed = parseExcelBufferToStudents(buf);
 
-      // 현재 학생들 캐시
       const existing = await all("SELECT name, code FROM students");
       const byCode = new Map(
         existing.map((s) => [
@@ -271,8 +261,8 @@ app.post(
       );
 
       let imported = 0;
-      const skipped_existing = []; // 이름+코드 일치
-      const skipped_code_conflict = []; // 코드 동일, 이름 다름
+      const skipped_existing = [];
+      const skipped_code_conflict = [];
 
       for (const r of parsed) {
         const name = String(r.name || "").trim();
@@ -282,28 +272,21 @@ app.post(
         if (!name || !code) continue;
 
         const key = `${name}|${code}`;
-
-        // 1) 이름+코드가 완전히 같으면 스킵
         if (byNameCode.has(key)) {
           skipped_existing.push({ name, code });
           continue;
         }
-
-        // 2) 코드가 이미 있는데 이름이 다르면 충돌
         const prev = byCode.get(code);
         if (prev && prev.name && prev.name !== name) {
           skipped_code_conflict.push({ name, code, exists_as: prev.name });
           continue;
         }
 
-        // 3) 신규 추가
         await run(
           "INSERT INTO students(name, code, phone, parent_phone) VALUES(?,?,?,?)",
           [name, code, phone, parent_phone]
         );
         imported++;
-
-        // 캐시 갱신
         byCode.set(code, { name });
         byNameCode.add(key);
       }
@@ -324,16 +307,16 @@ app.post(
   }
 );
 
-// ✅ EXCEL export: 사용자 포맷(ID, 이름, 학년, 학생전화, 보호자전화)
+// 엑셀 내보내기 (사용자 포맷)
 app.get("/api/admin/students/export-excel", async (_req, res) => {
   try {
     const rows = await all(
       "SELECT name, code, phone, parent_phone FROM students ORDER BY name"
     );
     const data = rows.map((r) => ({
-      ID: r.code, // 코드 = ID
+      ID: r.code,
       이름: r.name,
-      학년: "", // DB에 없으므로 공란
+      학년: "",
       학생전화: r.phone || "",
       보호자전화: r.parent_phone || "",
     }));
@@ -358,20 +341,30 @@ app.get("/api/admin/students/export-excel", async (_req, res) => {
   }
 });
 
+// 목록
 app.get("/api/admin/students", async (_req, res) =>
   res.json(await all("SELECT * FROM students ORDER BY name"))
 );
 
-// CRUD
+// ---------- 핵심 수정 1: 단건 추가를 upsert 로 변경 ----------
 app.post("/api/admin/students", async (req, res) => {
   const { name, code, phone, parent_phone } = req.body || {};
+  if (!name || !code) {
+    return res.status(400).json({ ok: false, error: "NAME_AND_CODE_REQUIRED" });
+  }
   await run(
-    "INSERT INTO students(name, code, phone, parent_phone) VALUES(?,?,?,?)",
-    [name, code, phone || "", parent_phone || ""]
+    `INSERT INTO students(name, code, phone, parent_phone)
+     VALUES(?,?,?,?)
+     ON CONFLICT(code) DO UPDATE SET
+       name=excluded.name,
+       phone=excluded.phone,
+       parent_phone=excluded.parent_phone`,
+    [name.trim(), code.trim(), (phone || "").trim(), (parent_phone || "").trim()]
   );
   res.json({ ok: true });
 });
 
+// 수정
 app.put("/api/admin/students/:id", async (req, res) => {
   const { id } = req.params;
   const { name, code, phone, parent_phone } = req.body || {};
@@ -382,6 +375,7 @@ app.put("/api/admin/students/:id", async (req, res) => {
   res.json({ ok: true });
 });
 
+// 삭제
 app.delete("/api/admin/students/:id", async (req, res) => {
   const { id } = req.params;
   await run("DELETE FROM students WHERE id=?", [id]);
@@ -405,6 +399,57 @@ app.get("/api/admin/students/export", async (_req, res) => {
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", 'attachment; filename="students.csv"');
   res.send(csv);
+});
+
+// ---------- 핵심 수정 2: 전체 저장(일괄 upsert, 트랜잭션 안정화) ----------
+app.post("/api/admin/students/bulk-upsert", async (req, res) => {
+  const list = Array.isArray(req.body?.students) ? req.body.students : [];
+  if (!list.length) return res.json({ ok: true, inserted: 0, updated: 0 });
+
+  let txStarted = false;
+  try {
+    await run("BEGIN IMMEDIATE TRANSACTION");
+    txStarted = true;
+
+    let inserted = 0;
+    let updated = 0;
+
+    for (const raw of list) {
+      const name = String(raw.name || "").trim();
+      const code = String(raw.code || "").trim();
+      const phone = String(raw.phone || "").trim();
+      const parent_phone = String(raw.parent_phone || "").trim();
+      if (!name || !code) continue;
+
+      // 현재 존재 여부 확인
+      const prev = await get("SELECT id, name, code FROM students WHERE code=?", [code]);
+
+      await run(
+        `INSERT INTO students(name, code, phone, parent_phone)
+         VALUES(?,?,?,?)
+         ON CONFLICT(code) DO UPDATE SET
+           name=excluded.name,
+           phone=excluded.phone,
+           parent_phone=excluded.parent_phone`,
+        [name, code, phone, parent_phone]
+      );
+
+      if (prev) updated++;
+      else inserted++;
+    }
+
+    await run("COMMIT");
+    txStarted = false;
+    return res.json({ ok: true, inserted, updated });
+  } catch (e) {
+    try {
+      if (txStarted) await run("ROLLBACK");
+    } catch (_) {}
+    return res.status(400).json({
+      ok: false,
+      error: e?.message || String(e),
+    });
+  }
 });
 
 // ---------- Global Policy ----------
@@ -511,6 +556,7 @@ app.get("/api/policy/active", async (req, res) => {
     end_date,
     no_service_days: bl,
     student: { id: s.id, name: s.name, code: s.code },
+    sms_extra_text: g?.sms_extra_text ?? null,
   });
 });
 
