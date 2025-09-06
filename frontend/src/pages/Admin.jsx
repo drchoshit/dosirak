@@ -1,4 +1,3 @@
-// frontend/src/pages/Admin.jsx
 import React, { useEffect, useMemo, useState } from 'react';
 import { api, studentAPI, adminAPI } from '../lib/api';
 import { FileDown, Printer, Settings, CalendarDays, Trash2, LogOut, Save } from 'lucide-react';
@@ -30,6 +29,7 @@ export default function Admin(){
 
   const [boSlot,setBoSlot]=useState('BOTH');
   const [search,setSearch]=useState('');
+  const [saving, setSaving] = useState(false);
 
   // ---- 최초 로그인 상태 확인 ----
   useEffect(() => {
@@ -66,7 +66,7 @@ export default function Admin(){
       await adminAPI.login(loginForm.username, loginForm.password);
       setIsAuthed(true);
       await load();
-    }catch{
+    }catch(err){
       setIsAuthed(false);
       setLoginError('아이디 또는 비밀번호가 올바르지 않습니다.');
     }
@@ -137,7 +137,7 @@ export default function Admin(){
     await load();
   }
 
-  // 학생 CRUD
+  // 학생 CRUD (단건 추가/수정은 upsert 성격)
   async function addStudent(){
     const payload = {
       name: (newStu.name||'').trim(),
@@ -145,9 +145,9 @@ export default function Admin(){
       phone: (newStu.phone||'').trim(),
       parent_phone: (newStu.parent_phone||'').trim(),
     };
-    if(!payload.name || !payload.code) return alert('이름/코드 필요');
+    if(!payload.name||!payload.code) return alert('이름/코드 필요');
     try{
-      await api.post('/admin/students', payload, { headers:{ 'Content-Type':'application/json' } });
+      await api.post('/admin/students', payload); // upsert
       setNewStu({name:'',code:'',phone:'',parent_phone:''});
       await load();
     }catch(e){
@@ -164,9 +164,9 @@ export default function Admin(){
     };
     try{
       if(String(row.id || '').startsWith('tmp-')){
-        await api.post('/admin/students', payload, { headers:{ 'Content-Type':'application/json' } });
+        await api.post('/admin/students', payload); // upsert
       } else {
-        await api.put('/admin/students/'+row.id, payload, { headers:{ 'Content-Type':'application/json' } });
+        await api.put('/admin/students/'+row.id, payload);
       }
       await load();
       alert('저장되었습니다.');
@@ -188,7 +188,8 @@ export default function Admin(){
   // ✅ 전체 저장 (현재 테이블의 모든 학생을 일괄 업서트)
   async function bulkSave(){
     try{
-      const rows = students
+      setSaving(true);
+      const studentsPayload = students
         .map(s=>({
           name: String(s.name||'').trim(),
           code: String(s.code||'').trim(),
@@ -197,18 +198,15 @@ export default function Admin(){
         }))
         .filter(x=>x.name && x.code);
 
-      if(rows.length === 0){ alert('저장할 항목이 없습니다.'); return; }
-
-      const { data } = await api.post(
-        '/admin/students/bulk-upsert',
-        { rows },                               // ★ 서버 스펙에 맞춤
-        { headers:{ 'Content-Type':'application/json' } }
-      );
+      const { data } = await api.post('/admin/students/bulk-upsert', { students: studentsPayload });
       await load();
-      alert(`전체 저장 완료\n신규 ${data?.inserted ?? 0}건, 수정 ${data?.updated ?? 0}건`);
+      alert(`전체 저장 완료\n신규 ${data?.inserted ?? 0}건, 수정 ${data?.updated ?? 0}건, 스킵 ${data?.skipped ?? 0}건`);
     }catch(e){
-      console.error(e);
-      alert('전체 저장에 실패했습니다.\n'+(e?.response?.data?.error||e.message||'')); 
+      console.error(e?.response?.data || e);
+      const detail = e?.response?.data?.error || e?.response?.data || e.message || 'Unknown error';
+      alert('전체 저장에 실패했습니다.\n' + String(detail));
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -242,7 +240,7 @@ export default function Admin(){
       end_date: (row.end_date||'') || null,
       price_override: (row.price_override==='' ? null : (row.price_override ?? null))
     };
-    await api.post('/admin/student-policy/'+row.id, payload, { headers:{ 'Content-Type':'application/json' } });
+    await api.post('/admin/student-policy/'+row.id, payload);
     alert('학생 예외 저장 완료');
     await load();
   }
@@ -250,7 +248,7 @@ export default function Admin(){
   // 블랙아웃 추가/삭제
   async function addNoSvc(){
     if(!boDate) return alert('날짜');
-    await api.post('/admin/no-service-days',{date:boDate,slot:boSlot},{ headers:{ 'Content-Type':'application/json' } });
+    await api.post('/admin/no-service-days',{date:boDate,slot:boSlot});
     setBoDate(''); setBoSlot('BOTH');
     await load();
   }
@@ -351,13 +349,18 @@ export default function Admin(){
         <div className="card p-5">
           <div className="flex items-center justify-between gap-2">
             <h2 className="font-bold text-lg">학생 DB</h2>
-            <button className="btn flex items-center gap-2" onClick={bulkSave} title="현재 목록을 한 번에 DB에 반영">
-              <Save size={16}/> 전체 저장
+            {/* ✅ 전체 저장 */}
+            <button className="btn flex items-center gap-2" onClick={bulkSave} disabled={saving} title="현재 목록을 한 번에 DB에 반영">
+              <Save size={16}/> {saving ? '저장 중…' : '전체 저장'}
             </button>
           </div>
 
-          {/* 추가 입력 줄: 4 입력 + 버튼 한 줄 */}
-          <div className="mt-3 grid grid-cols-1 lg:grid-cols-[1fr_1fr_1fr_1fr_auto] gap-2 items-end">
+          {/* 업로드/다운로드 + 학생 추가 (같은 줄 정렬) */}
+          <div className="
+            mt-3 grid gap-2 items-end
+            sm:grid-cols-2
+            md:grid-cols-[1fr_1fr_1fr_1fr_auto]
+          ">
             <input className="input" placeholder="이름" value={newStu.name} onChange={e=>setNewStu(s=>({...s,name:e.target.value}))}/>
             <input className="input" placeholder="코드" value={newStu.code} onChange={e=>setNewStu(s=>({...s,code:e.target.value}))}/>
             <input className="input" placeholder="학생 연락처" value={newStu.phone} onChange={e=>setNewStu(s=>({...s,phone:e.target.value}))}/>
@@ -365,8 +368,7 @@ export default function Admin(){
             <button className="btn" onClick={addStudent}>학생 추가</button>
           </div>
 
-          {/* 다운로드/불러오기, 검색 */}
-          <div className="mt-3 flex flex-wrap gap-2">
+          <div className="mt-3 flex flex-wrap gap-2 items-center">
             <button className="btn-ghost" onClick={exportStudentsXlsx}>다운로드(엑셀)</button>
             <label className="btn-ghost">
               <input type="file" accept=".xlsx,.xls" className="hidden" onChange={onExcelPreviewPick}/>
@@ -380,7 +382,7 @@ export default function Admin(){
             </label>
 
             <div className="grow" />
-            <input className="input w-60" placeholder="이름 또는 코드 검색" value={search} onChange={e=>setSearch(e.target.value)} />
+            <input className="input w-full sm:w-80" placeholder="이름 또는 코드 검색" value={search} onChange={e=>setSearch(e.target.value)} />
           </div>
 
           <div className="mt-4 overflow-x-auto">
@@ -471,7 +473,7 @@ export default function Admin(){
           </div>
           <button className="btn-primary mt-3" onClick={async ()=>{
             const payload={...policy};
-            await api.post('/admin/policy',payload,{ headers:{ 'Content-Type':'application/json' } });
+            await api.post('/admin/policy',payload);
             alert('정책 저장 완료');
           }}>저장</button>
         </div>
