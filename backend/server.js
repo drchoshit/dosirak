@@ -776,10 +776,10 @@ app.get("/api/admin/print", async (req, res) => {
 });
 
 /* ===============================
-   🔶 신청자(기간) 조회 / 저장 (유지)
+   🔶 신청자(기간) 조회 / 저장 — 학생 단일 체크(점/저 묶음)
    =============================== */
 
-// 기간 내 신청자 목록(중복 제거, 슬롯별 신청/결제 집계)
+// 기간 내 신청자 목록(학생 단위 집계)
 app.get("/api/admin/applicants-range", async (req, res) => {
   try {
     const { start, end } = req.query || {};
@@ -795,14 +795,12 @@ app.get("/api/admin/applicants-range", async (req, res) => {
         s.id,
         s.name,
         s.code,
-        SUM(CASE WHEN o.slot='LUNCH' THEN 1 ELSE 0 END) AS lunch_applied,
-        SUM(CASE WHEN o.slot='DINNER' THEN 1 ELSE 0 END) AS dinner_applied,
-        SUM(CASE WHEN o.slot='LUNCH' AND o.status='PAID' THEN 1 ELSE 0 END) AS lunch_paid_cnt,
-        SUM(CASE WHEN o.slot='DINNER' AND o.status='PAID' THEN 1 ELSE 0 END) AS dinner_paid_cnt
+        SUM(CASE WHEN o.status IN ('SELECTED','PAID') THEN 1 ELSE 0 END) AS applied_count,
+        SUM(CASE WHEN o.status='PAID' THEN 1 ELSE 0 END)               AS paid_count,
+        SUM(CASE WHEN o.status IN ('SELECTED','PAID') THEN o.price ELSE 0 END) AS total_amount
       FROM orders o
       JOIN students s ON s.id = o.student_id
       WHERE o.date BETWEEN ? AND ?
-        AND o.status IN ('SELECTED','PAID')
       GROUP BY s.id, s.name, s.code
       ORDER BY s.name ASC
       `,
@@ -810,20 +808,17 @@ app.get("/api/admin/applicants-range", async (req, res) => {
     );
 
     const list = rows.map((r) => {
-      const lunchApplied = Number(r.lunch_applied || 0) > 0;
-      const dinnerApplied = Number(r.dinner_applied || 0) > 0;
-      const lunchPaid =
-        lunchApplied &&
-        Number(r.lunch_paid_cnt || 0) === Number(r.lunch_applied || 0);
-      const dinnerPaid =
-        dinnerApplied &&
-        Number(r.dinner_paid_cnt || 0) === Number(r.dinner_applied || 0);
+      const applied_count = Number(r.applied_count || 0);
+      const paid_count = Number(r.paid_count || 0);
+      const total_amount = Number(r.total_amount || 0);
       return {
         id: r.id,
         name: r.name,
         code: r.code,
-        lunch: { applied: lunchApplied, paid: lunchPaid },
-        dinner: { applied: dinnerApplied, paid: dinnerPaid },
+        applied_count,
+        paid_count,
+        total_amount,
+        paid: applied_count > 0 && paid_count === applied_count,
       };
     });
 
@@ -834,7 +829,9 @@ app.get("/api/admin/applicants-range", async (req, res) => {
   }
 });
 
-// 기간 내 결제표시 저장 (체크 → PAID / 해제 → SELECTED)
+// 기간 내 결제표시 저장
+// - items: [{ code, paid }]  → 기간 내 해당 학생의 모든 주문(점/저)을 일괄 상태 변경
+// - (하위호환) { code, slot, paid } 도 가능: 주어진 슬롯만 변경
 app.post("/api/admin/payments/mark-range", async (req, res) => {
   try {
     const { start, end, items } = req.body || {};
@@ -847,25 +844,40 @@ app.post("/api/admin/payments/mark-range", async (req, res) => {
     if (!list.length) return res.json({ ok: true, updated: 0 });
 
     let updated = 0;
+
     for (const it of list) {
       const code = String(it.code || "").trim();
-      const slot = String(it.slot || "").toUpperCase();
+      const slotRaw = String(it.slot || "").toUpperCase();
+      const hasSlot = slotRaw === "LUNCH" || slotRaw === "DINNER";
       const paid = !!it.paid;
-      if (!code || (slot !== "LUNCH" && slot !== "DINNER")) continue;
+      if (!code) continue;
 
       const s = await get("SELECT id FROM students WHERE code=?", [code]);
       if (!s) continue;
 
       const newStatus = paid ? "PAID" : "SELECTED";
-      const r = await run(
-        `UPDATE orders
-           SET status=?
-         WHERE student_id=?
-           AND slot=?
-           AND date BETWEEN ? AND ?
-           AND status IN ('SELECTED','PAID')`,
-        [newStatus, s.id, slot, start, end]
-      );
+
+      let r;
+      if (hasSlot) {
+        r = await run(
+          `UPDATE orders
+             SET status=?
+           WHERE student_id=?
+             AND slot=?
+             AND date BETWEEN ? AND ?
+             AND status IN ('SELECTED','PAID')`,
+          [newStatus, s.id, slotRaw, start, end]
+        );
+      } else {
+        r = await run(
+          `UPDATE orders
+             SET status=?
+           WHERE student_id=?
+             AND date BETWEEN ? AND ?
+             AND status IN ('SELECTED','PAID')`,
+          [newStatus, s.id, start, end]
+        );
+      }
       updated += Number(r?.changes || 0);
     }
 
@@ -877,7 +889,7 @@ app.post("/api/admin/payments/mark-range", async (req, res) => {
 });
 
 /* ===============================
-   🔶 신청자(단일 날짜) 조회 / 저장 - Admin.jsx에서 사용
+   🔶 신청자(단일 날짜) 조회 / 저장 - Admin.jsx에서 사용 (하위호환 유지)
    =============================== */
 
 // 단일 날짜 신청자 목록
@@ -928,7 +940,7 @@ app.get("/api/admin/applicants", async (req, res) => {
   }
 });
 
-// 단일 날짜 결제 체크 저장
+// 단일 날짜 결제 체크 저장 (하위호환)
 app.post("/api/admin/payments/mark", async (req, res) => {
   try {
     const { date, items } = req.body || {};

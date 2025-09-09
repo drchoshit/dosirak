@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { api, studentAPI, adminAPI } from '../lib/api';
-import { FileDown, Printer, Settings, CalendarDays, Trash2, LogOut, Save, CheckSquare, Square } from 'lucide-react';
+import { Printer, Settings, CalendarDays, Trash2, LogOut, Save, CheckSquare, Square } from 'lucide-react';
 
 const DAY_LABELS = ['일','월','화','수','목','금','토'];
 const DAY_CODES  = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
@@ -30,10 +30,19 @@ export default function Admin(){
   const [search,setSearch]=useState('');
   const [saving, setSaving] = useState(false);
 
-  // --- 결제 체크(신청자) UI 상태 (기간 기반) ---
+  // --- 신청자 결제 체크(기간 단위, 학생 단일 체크) ---
   const [appStart, setAppStart] = useState('');
   const [appEnd, setAppEnd] = useState('');
-  // rows: [{id,name,code,lunchApplied,lunchPaid,dinnerApplied,dinnerPaid}]
+  /**
+   * rows 스키마(신규):
+   * {
+   *   id, name, code,
+   *   applied_count: number,   // 기간 내 신청한 총 식수(점+저)
+   *   paid_count: number,      // 기간 내 결제된 총 식수
+   *   total_amount: number,    // 결제해야 할 총 금액(기본가/개별가 반영)
+   *   paid: boolean            // 학생 단위: 기간 내 신청분이 모두 결제되었는지
+   * }
+   */
   const [appRows, setAppRows] = useState([]);
   const [appsLoading, setAppsLoading] = useState(false);
   const [appsDirty, setAppsDirty] = useState(false);
@@ -302,30 +311,46 @@ export default function Admin(){
   }
 
   // -------------------
-  // 🔶 신청자 결제 체크 로직 (기간)
+  // 🔶 신청자 결제 체크 로직 (기간) — 학생 단일 체크 + 금액
   // -------------------
   async function loadApplicantsRange(){
     if(!appStart || !appEnd) { alert('시작일과 종료일을 선택하세요.'); return; }
     setAppsLoading(true);
     try{
-      console.log('[신청자 불러오기] GET /admin/applicants-range', { start: appStart, end: appEnd });
       const { data } = await api.get('/admin/applicants-range', { params: { start: appStart, end: appEnd } });
 
-      // 백엔드 응답은 배열입니다: [{ id, name, code, lunch:{applied,paid}, dinner:{applied,paid} }]
-      const rows = (Array.isArray(data) ? data : []).map(r => ({
-        id: r.id,
-        name: r.name,
-        code: r.code,
-        lunchApplied: !!r?.lunch?.applied,
-        lunchPaid: !!r?.lunch?.paid,
-        dinnerApplied: !!r?.dinner?.applied,
-        dinnerPaid: !!r?.dinner?.paid
-      }));
+      // 백엔드 신규 스키마 대응 + 구버전 호환(점/저 필드가 온 경우 유추)
+      const rows = (Array.isArray(data) ? data : []).map(r => {
+        if (typeof r.applied_count === 'number') {
+          // 신규 스키마
+          return {
+            id: r.id, name: r.name, code: r.code,
+            applied_count: Number(r.applied_count || 0),
+            paid_count: Number(r.paid_count || 0),
+            total_amount: Number(r.total_amount || 0),
+            paid: !!r.paid
+          };
+        } else {
+          // 구버전(점/저) → 단일 스키마로 변환
+          const lunchApplied = Number(r?.lunch_applied || 0) > 0;
+          const dinnerApplied = Number(r?.dinner_applied || 0) > 0;
+          const lunchPaidCnt = Number(r?.lunch_paid_cnt || 0);
+          const dinnerPaidCnt = Number(r?.dinner_paid_cnt || 0);
+          const appliedCnt = (lunchApplied?1:0) + (dinnerApplied?1:0);
+          const paidCnt = lunchPaidCnt + dinnerPaidCnt;
+          const base = Number(policy?.base_price || 0);
+          return {
+            id: r.id, name: r.name, code: r.code,
+            applied_count: appliedCnt,
+            paid_count: paidCnt,
+            total_amount: appliedCnt * base,
+            paid: appliedCnt>0 && paidCnt === appliedCnt
+          };
+        }
+      });
 
-      console.log('[신청자 불러오기 결과] rows=', rows.length);
       setAppRows(rows);
       setAppsDirty(false);
-
       if (!rows.length) alert('해당 기간에 신청자가 없습니다.');
     }catch(e){
       console.error(e);
@@ -335,34 +360,27 @@ export default function Admin(){
     }
   }
 
-  function setPaid(rowIndex, slot, val){
-    setAppRows(list => list.map((r,i) => i===rowIndex ? {
-      ...r,
-      ...(slot === 'LUNCH' ? { lunchPaid: !!val } : {}),
-      ...(slot === 'DINNER' ? { dinnerPaid: !!val } : {}),
-    } : r));
+  // 학생 단일 결제 토글
+  function setPaid(rowIndex, val){
+    setAppRows(list => list.map((r,i) => i===rowIndex ? { ...r, paid: !!val } : r));
     setAppsDirty(true);
   }
 
-  function bulkToggle(slot, value){
-    setAppRows(list => list.map(r => ({
-      ...r,
-      ...(slot === 'LUNCH' ? { lunchPaid: value && r.lunchApplied ? true : false } : {}),
-      ...(slot === 'DINNER' ? { dinnerPaid: value && r.dinnerApplied ? true : false } : {}),
-    })));
+  // 전체 토글
+  function bulkToggleAll(value){
+    setAppRows(list => list.map(r => r.applied_count>0 ? ({ ...r, paid: !!value }) : r));
     setAppsDirty(true);
   }
 
+  // 저장
   async function saveApplicantsPaid(){
     if (!appRows.length) return;
     try{
-      const items = [];
-      appRows.forEach(r=>{
-        if (r.lunchApplied)  items.push({ code: r.code, slot: 'LUNCH',  paid: !!r.lunchPaid });
-        if (r.dinnerApplied) items.push({ code: r.code, slot: 'DINNER', paid: !!r.dinnerPaid });
-      });
+      // 학생 단위로 {code, paid} 전송
+      const items = appRows
+        .filter(r => r.applied_count > 0)
+        .map(r => ({ code: r.code, paid: !!r.paid }));
 
-      console.log('[결제 저장] POST /admin/payments/mark-range', { start: appStart, end: appEnd, itemsCount: items.length });
       await api.post('/admin/payments/mark-range', { start: appStart, end: appEnd, items });
 
       setAppsDirty(false);
@@ -373,6 +391,12 @@ export default function Admin(){
       alert('저장에 실패했습니다.\n' + (e?.response?.data?.error || e.message || 'Unknown error'));
     }
   }
+
+  // 파생: 미결제 학생
+  const unpaidRows = useMemo(
+    () => appRows.filter(r => r.applied_count > 0 && !r.paid),
+    [appRows]
+  );
 
   // ===== 렌더링 =====
   if (isAuthed === null) {
@@ -443,10 +467,8 @@ export default function Admin(){
 
           <div className="grow" />
           <div className="flex gap-2">
-            <button className="btn-ghost" onClick={()=>bulkToggle('LUNCH', true)} title="점심 전체 체크"><CheckSquare size={16}/> 점심 전체</button>
-            <button className="btn-ghost" onClick={()=>bulkToggle('LUNCH', false)} title="점심 전체 해제"><Square size={16}/> 점심 해제</button>
-            <button className="btn-ghost" onClick={()=>bulkToggle('DINNER', true)} title="저녁 전체 체크"><CheckSquare size={16}/> 저녁 전체</button>
-            <button className="btn-ghost" onClick={()=>bulkToggle('DINNER', false)} title="저녁 전체 해제"><Square size={16}/> 저녁 해제</button>
+            <button className="btn-ghost" onClick={()=>bulkToggleAll(true)} title="전체 결제 처리"><CheckSquare size={16}/> 전체 결제</button>
+            <button className="btn-ghost" onClick={()=>bulkToggleAll(false)} title="전체 결제 해제"><Square size={16}/> 전체 해제</button>
             <button className="btn-primary" disabled={!appsDirty || !appRows.length} onClick={saveApplicantsPaid}>
               변경사항 저장
             </button>
@@ -459,8 +481,10 @@ export default function Admin(){
               <tr>
                 <th className="p-2 border text-left">이름</th>
                 <th className="p-2 border text-left">코드</th>
-                <th className="p-2 border text-center">점심</th>
-                <th className="p-2 border text-center">저녁</th>
+                <th className="p-2 border text-center">신청식수</th>
+                <th className="p-2 border text-center">결제식수</th>
+                <th className="p-2 border text-right">결제금액</th>
+                <th className="p-2 border text-center">결제됨</th>
               </tr>
             </thead>
             <tbody>
@@ -468,26 +492,57 @@ export default function Admin(){
                 <tr key={r.code} className="hover:bg-slate-50">
                   <td className="p-2 border">{r.name}</td>
                   <td className="p-2 border">{r.code}</td>
+                  <td className="p-2 border text-center">{r.applied_count ?? 0}</td>
+                  <td className="p-2 border text-center">{r.paid_count ?? 0}</td>
+                  <td className="p-2 border text-right">{Number(r.total_amount||0).toLocaleString()}원</td>
                   <td className="p-2 border text-center">
-                    {r.lunchApplied ? (
-                      <input type="checkbox" checked={!!r.lunchPaid} onChange={e=>setPaid(idx,'LUNCH',e.target.checked)} />
-                    ) : <span className="text-slate-400">-</span>}
-                  </td>
-                  <td className="p-2 border text-center">
-                    {r.dinnerApplied ? (
-                      <input type="checkbox" checked={!!r.dinnerPaid} onChange={e=>setPaid(idx,'DINNER',e.target.checked)} />
+                    {r.applied_count>0 ? (
+                      <input type="checkbox" checked={!!r.paid} onChange={e=>setPaid(idx, e.target.checked)} />
                     ) : <span className="text-slate-400">-</span>}
                   </td>
                 </tr>
               ))}
               {appRows.length===0 && (
-                <tr><td className="p-4 border text-center text-slate-500" colSpan={4}>신청자가 없습니다. 기간을 선택하고 불러오기를 눌러주세요.</td></tr>
+                <tr><td className="p-4 border text-center text-slate-500" colSpan={6}>신청자가 없습니다. 기간을 선택하고 불러오기를 눌러주세요.</td></tr>
               )}
             </tbody>
           </table>
         </div>
+
         <div className="text-xs text-slate-500 mt-2">
-          * 체크된 항목은 인쇄 시 <b>결제자 목록</b>에, 체크 해제된 항목은 <b>미결제자 목록</b>에 나타납니다.
+          * 체크하면 해당 학생의 <b>기간 내 모든 신청(점심/저녁)</b>이 결제 완료 처리됩니다.
+        </div>
+
+        {/* 미결제 학생 목록 */}
+        <div className="mt-6">
+          <h3 className="font-semibold mb-2">미결제 학생</h3>
+          <div className="overflow-auto">
+            <table className="min-w-[520px] w-full text-sm border">
+              <thead className="bg-slate-50">
+                <tr>
+                  <th className="p-2 border text-left">이름</th>
+                  <th className="p-2 border text-left">코드</th>
+                  <th className="p-2 border text-center">신청식수</th>
+                  <th className="p-2 border text-right">결제 필요 금액</th>
+                </tr>
+              </thead>
+              <tbody>
+                {unpaidRows.map(r=>(
+                  <tr key={r.code}>
+                    <td className="p-2 border">{r.name}</td>
+                    <td className="p-2 border">{r.code}</td>
+                    <td className="p-2 border text-center">{r.applied_count ?? 0}</td>
+                    <td className="p-2 border text-right">
+                      {Number(r.total_amount || 0).toLocaleString()}원
+                    </td>
+                  </tr>
+                ))}
+                {unpaidRows.length===0 && (
+                  <tr><td colSpan={4} className="p-4 text-center text-slate-500">모든 신청이 결제되었습니다.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 
