@@ -401,17 +401,17 @@ app.get("/api/admin/students/export", async (_req, res) => {
     "SELECT name, code, phone, parent_phone FROM students ORDER BY name"
   );
   const header = "name,code,phone,parent_phone\n";
-  const body = rows
-    .map((r) =>
-      [r.name, r.code, r.phone || "", r.parent_phone || ""]
-        .map((v) => `"${String(v).replaceAll(`"`, `""`)}"`)
-        .join(",")
-    )
-    .join("\n");
-  const csv = header + body + "\n";
+  const body =
+    rows
+      .map((r) =>
+        [r.name, r.code, r.phone || "", r.parent_phone || ""]
+          .map((v) => `"${String(v).replaceAll(`"`, `""`)}"`)
+          .join(",")
+      )
+      .join("\n") + "\n";
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", 'attachment; filename="students.csv"');
-  res.send(csv);
+  res.send(header + body);
 });
 
 // ---------- 전체 저장(일괄 upsert) ----------
@@ -611,6 +611,108 @@ app.post("/api/payments/toss/confirm", async (req, res) => {
       error: "confirm_failed",
       detail: e?.response?.data || String(e),
     });
+  }
+});
+
+/* ===============================
+   🔷 Admin: Orders List & Cancellation
+   =============================== */
+
+// 신청 리스트 조회
+// GET /api/admin/orders?start=YYYY-MM-DD&end=YYYY-MM-DD&q=검색어
+// status IN ('SELECTED','PAID')를 조회(둘 다 보여줌)
+app.get("/api/admin/orders", async (req, res) => {
+  try {
+    const { start, end, q } = req.query || {};
+
+    const where = ["o.status IN ('SELECTED','PAID')"];
+    const params = [];
+    if (start) { where.push("o.date >= ?"); params.push(start); }
+    if (end)   { where.push("o.date <= ?"); params.push(end); }
+    if (q && String(q).trim()) {
+      where.push("(s.name LIKE ? OR s.code LIKE ?)");
+      params.push(`%${q}%`, `%${q}%`);
+    }
+
+    const sql = `
+      SELECT 
+        o.id, o.date, o.slot, o.price, o.status,
+        s.id AS student_id, s.name, s.code
+      FROM orders o
+      JOIN students s ON s.id = o.student_id
+      ${where.length ? "WHERE " + where.join(" AND ") : ""}
+      ORDER BY s.name ASC, o.date ASC, o.slot ASC
+    `;
+    const rows = await all(sql, params);
+
+    // 학생별 그룹 합계도 제공
+    const byStudent = new Map();
+    for (const r of rows) {
+      const key = r.student_id;
+      if (!byStudent.has(key)) {
+        byStudent.set(key, {
+          student_id: r.student_id,
+          name: r.name,
+          code: r.code,
+          total_amount: 0,
+          count: 0,
+          items: [],
+        });
+      }
+      const g = byStudent.get(key);
+      g.items.push({
+        id: r.id,
+        date: r.date,
+        slot: r.slot,
+        price: r.price,
+        status: r.status,
+      });
+      g.count += 1;
+      g.total_amount += Number(r.price || 0);
+    }
+
+    res.json({ ok: true, rows, groups: Array.from(byStudent.values()) });
+  } catch (e) {
+    console.error("GET /api/admin/orders error:", e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// 개별 끼 취소(삭제) — 상태와 무관(SELECTED/PAID 전부 삭제 가능)
+app.delete("/api/admin/orders/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const r = await run("DELETE FROM orders WHERE id=?", [id]);
+    res.json({ ok: true, deleted: Number(r?.changes || 0) });
+  } catch (e) {
+    console.error("DELETE /api/admin/orders/:id error:", e);
+    res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// 학생 단위 일괄 취소 — 상태와 무관(선택 기간/슬롯 조건에 맞는 모든 주문 삭제)
+app.post("/api/admin/orders/cancel-student", async (req, res) => {
+  try {
+    const { code, start, end, slot } = req.body || {};
+    if (!code) return res.status(400).json({ ok: false, error: "code required" });
+
+    const s = await get("SELECT id FROM students WHERE code=?", [code]);
+    if (!s) return res.status(404).json({ ok: false, error: "student not found" });
+
+    const where = ["student_id = ?"];
+    const params = [s.id];
+    if (start) { where.push("date >= ?"); params.push(start); }
+    if (end)   { where.push("date <= ?"); params.push(end); }
+    if (slot && (slot === "LUNCH" || slot === "DINNER")) {
+      where.push("slot = ?"); params.push(slot);
+    }
+
+    const sql = `DELETE FROM orders WHERE ${where.join(" AND ")}`;
+    const r = await run(sql, params);
+    res.json({ ok: true, deleted: Number(r?.changes || 0) });
+  } catch (e) {
+    console.error("POST /api/admin/orders/cancel-student error:", e);
+    res.status(400).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
@@ -829,9 +931,7 @@ app.get("/api/admin/applicants-range", async (req, res) => {
   }
 });
 
-// 기간 내 결제표시 저장
-// - items: [{ code, paid }]  → 기간 내 해당 학생의 모든 주문(점/저)을 일괄 상태 변경
-// - (하위호환) { code, slot, paid } 도 가능: 주어진 슬롯만 변경
+// 기간 내 결제표시 저장 (학생 단위 또는 슬롯 단위)
 app.post("/api/admin/payments/mark-range", async (req, res) => {
   try {
     const { start, end, items } = req.body || {};
@@ -862,9 +962,7 @@ app.post("/api/admin/payments/mark-range", async (req, res) => {
         r = await run(
           `UPDATE orders
              SET status=?
-           WHERE student_id=?
-             AND slot=?
-             AND date BETWEEN ? AND ?
+           WHERE student_id=? AND slot=? AND date BETWEEN ? AND ?
              AND status IN ('SELECTED','PAID')`,
           [newStatus, s.id, slotRaw, start, end]
         );
@@ -872,8 +970,7 @@ app.post("/api/admin/payments/mark-range", async (req, res) => {
         r = await run(
           `UPDATE orders
              SET status=?
-           WHERE student_id=?
-             AND date BETWEEN ? AND ?
+           WHERE student_id=? AND date BETWEEN ? AND ?
              AND status IN ('SELECTED','PAID')`,
           [newStatus, s.id, start, end]
         );
@@ -889,7 +986,7 @@ app.post("/api/admin/payments/mark-range", async (req, res) => {
 });
 
 /* ===============================
-   🔶 신청자(단일 날짜) 조회 / 저장 - Admin.jsx에서 사용 (하위호환 유지)
+   🔶 신청자(단일 날짜) 조회 / 저장 - (하위호환)
    =============================== */
 
 // 단일 날짜 신청자 목록
@@ -1160,6 +1257,7 @@ app.use(express.static(PUBLIC_DIR));
 const SPA_ROUTES = [
   "/",
   "/admin",
+  "/admin/orders",
   "/admin/print",
   "/payment/success",
   "/payment/fail",

@@ -5,6 +5,7 @@ import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
 import Student from './pages/Student.jsx';
 import Admin from './pages/Admin.jsx';
 import Print from './pages/Print.jsx';
+import Orders from './pages/Orders.jsx';
 import Success from './pages/PaymentSuccess.jsx';
 import Fail from './pages/PaymentFail.jsx';
 import './styles.css';
@@ -20,6 +21,7 @@ function Frame({ children }) {
           <nav className="flex items-center gap-4">
             <Link to="/" className="hover:underline">학생 신청</Link>
             <Link to="/admin" className="hover:underline">관리자</Link>
+            <Link to="/admin/orders" className="hover:underline">신청 리스트</Link> {/* ✅ 추가 */}
           </nav>
         </div>
       </header>
@@ -34,6 +36,7 @@ createRoot(document.getElementById('root')).render(
       <Routes>
         <Route path="/" element={<Frame><Student /></Frame>} />
         <Route path="/admin" element={<Frame><Admin /></Frame>} />
+        <Route path="/admin/orders" element={<Frame><Orders /></Frame>} />  {/* ✅ 추가 */}
         <Route path="/admin/print" element={<Frame><Print /></Frame>} />
         <Route path="/payment/success" element={<Frame><Success /></Frame>} />
         <Route path="/payment/fail" element={<Frame><Fail /></Frame>} />
