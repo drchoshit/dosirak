@@ -82,7 +82,8 @@ function adminAuth(req, res, next) {
 app.use("/api/admin", adminAuth);
 
 // Uploads
-const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
+const UPLOAD_DIR =
+  process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 app.use("/uploads", express.static(UPLOAD_DIR));
 
@@ -131,10 +132,16 @@ function headerKey(h) {
   if (/(^|[^가-힣a-z])코드([^가-힣a-z]|$)/.test(s) || /(code|id)\b/.test(s))
     return "code";
 
-  if (/학생.?연락/.test(s) || /(student.*(phone|tel)|phone_student|학생전화)/.test(s))
+  if (
+    /학생.?연락/.test(s) ||
+    /(student.*(phone|tel)|phone_student|학생전화)/.test(s)
+  )
     return "studentPhone";
 
-  if (/(학부모|보호자).?연락/.test(s) || /(parent.*(phone|tel)|phone_parent|보호자전화)/.test(s))
+  if (
+    /(학부모|보호자).?연락/.test(s) ||
+    /(parent.*(phone|tel)|phone_parent|보호자전화)/.test(s)
+  )
     return "parentPhone";
 
   return null;
@@ -176,7 +183,8 @@ function parseExcelBufferToStudents(buf) {
       if (k === "studentPhone" || k === "parentPhone") v = normalizePhone(v);
       obj[k] = String(v ?? "").trim();
     }
-    if (obj.name || obj.code || obj.studentPhone || obj.parentPhone) out.push(obj);
+    if (obj.name || obj.code || obj.studentPhone || obj.parentPhone)
+      out.push(obj);
   }
   return out;
 }
@@ -230,7 +238,9 @@ app.post(
       return res.json({ ok: true, students });
     } catch (e) {
       console.error(e);
-      return res.status(500).json({ ok: false, error: String(e?.message || e) });
+      return res
+        .status(500)
+        .json({ ok: false, error: String(e?.message || e) });
     }
   }
 );
@@ -256,7 +266,8 @@ app.post(
       );
       const byNameCode = new Set(
         existing.map(
-          (s) => `${String(s.name || "").trim()}|${String(s.code || "").trim()}`
+          (s) =>
+            `${String(s.name || "").trim()}|${String(s.code || "").trim()}`
         )
       );
 
@@ -346,11 +357,13 @@ app.get("/api/admin/students", async (_req, res) =>
   res.json(await all("SELECT * FROM students ORDER BY name"))
 );
 
-// ---------- 핵심 수정 1: 단건 추가를 upsert 로 변경 ----------
+// ---------- 단건 upsert ----------
 app.post("/api/admin/students", async (req, res) => {
   const { name, code, phone, parent_phone } = req.body || {};
   if (!name || !code) {
-    return res.status(400).json({ ok: false, error: "NAME_AND_CODE_REQUIRED" });
+    return res
+      .status(400)
+      .json({ ok: false, error: "NAME_AND_CODE_REQUIRED" });
   }
   await run(
     `INSERT INTO students(name, code, phone, parent_phone)
@@ -401,16 +414,12 @@ app.get("/api/admin/students/export", async (_req, res) => {
   res.send(csv);
 });
 
-// ---------- 핵심 수정 2: 전체 저장(일괄 upsert, 트랜잭션 안정화) ----------
+// ---------- 전체 저장(일괄 upsert) ----------
 app.post("/api/admin/students/bulk-upsert", async (req, res) => {
   const list = Array.isArray(req.body?.students) ? req.body.students : [];
   if (!list.length) return res.json({ ok: true, inserted: 0, updated: 0 });
 
-  let txStarted = false;
   try {
-    await run("BEGIN IMMEDIATE TRANSACTION");
-    txStarted = true;
-
     let inserted = 0;
     let updated = 0;
 
@@ -421,8 +430,7 @@ app.post("/api/admin/students/bulk-upsert", async (req, res) => {
       const parent_phone = String(raw.parent_phone || "").trim();
       if (!name || !code) continue;
 
-      // 현재 존재 여부 확인
-      const prev = await get("SELECT id, name, code FROM students WHERE code=?", [code]);
+      const prev = await get("SELECT id FROM students WHERE code=?", [code]);
 
       await run(
         `INSERT INTO students(name, code, phone, parent_phone)
@@ -438,13 +446,8 @@ app.post("/api/admin/students/bulk-upsert", async (req, res) => {
       else inserted++;
     }
 
-    await run("COMMIT");
-    txStarted = false;
     return res.json({ ok: true, inserted, updated });
   } catch (e) {
-    try {
-      if (txStarted) await run("ROLLBACK");
-    } catch (_) {}
     return res.status(400).json({
       ok: false,
       error: e?.message || String(e),
@@ -628,8 +631,9 @@ app.get("/api/admin/weekly-summary", async (req, res) => {
   const students = await all(
     "SELECT id, name, code FROM students ORDER BY name"
   );
+  // 결제된 건(=PAID)만 요약에 포함
   const orders = await all(
-    "SELECT student_id, date, slot FROM orders WHERE status='SELECTED' AND date BETWEEN ? AND ?",
+    "SELECT student_id, date, slot FROM orders WHERE status='PAID' AND date BETWEEN ? AND ?",
     [start, end]
   );
 
@@ -712,6 +716,254 @@ app.get("/api/admin/attendance.csv", async (req, res) => {
   res.send(csv);
 });
 
+// ---------- 인쇄용 JSON API (단일 날짜, 중복 제거) ----------
+app.get("/api/admin/print", async (req, res) => {
+  const { date } = req.query;
+  if (!date) return res.status(400).json({ ok: false, error: "date required" });
+
+  // 학생 1명당 1행: PAID 여부는 MAX 집계로 판단
+  const lunchRows = await all(
+    `
+    SELECT s.id, s.name, s.code,
+           MAX(CASE WHEN o.status='PAID' THEN 1 ELSE 0 END) AS is_paid
+      FROM orders o
+      JOIN students s ON o.student_id = s.id
+     WHERE o.date=? AND o.slot='LUNCH' AND o.status IN ('SELECTED','PAID')
+  GROUP BY s.id, s.name, s.code
+  ORDER BY is_paid DESC, s.name ASC
+    `,
+    [date]
+  );
+
+  const dinnerRows = await all(
+    `
+    SELECT s.id, s.name, s.code,
+           MAX(CASE WHEN o.status='PAID' THEN 1 ELSE 0 END) AS is_paid
+      FROM orders o
+      JOIN students s ON o.student_id = s.id
+     WHERE o.date=? AND o.slot='DINNER' AND o.status IN ('SELECTED','PAID')
+  GROUP BY s.id, s.name, s.code
+  ORDER BY is_paid DESC, s.name ASC
+    `,
+    [date]
+  );
+
+  const lunch = lunchRows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    code: r.code,
+    status: Number(r.is_paid) ? "PAID" : "SELECTED",
+  }));
+  const dinner = dinnerRows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    code: r.code,
+    status: Number(r.is_paid) ? "PAID" : "SELECTED",
+  }));
+
+  return res.json({
+    ok: true,
+    date,
+    lunch,
+    dinner,
+    counts: {
+      lunch_total: lunch.length,
+      dinner_total: dinner.length,
+      lunch_paid: lunch.filter((x) => x.status === "PAID").length,
+      dinner_paid: dinner.filter((x) => x.status === "PAID").length,
+    },
+  });
+});
+
+/* ===============================
+   🔶 신청자(기간) 조회 / 저장 (유지)
+   =============================== */
+
+// 기간 내 신청자 목록(중복 제거, 슬롯별 신청/결제 집계)
+app.get("/api/admin/applicants-range", async (req, res) => {
+  try {
+    const { start, end } = req.query || {};
+    if (!start || !end) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "start and end required" });
+    }
+
+    const rows = await all(
+      `
+      SELECT
+        s.id,
+        s.name,
+        s.code,
+        SUM(CASE WHEN o.slot='LUNCH' THEN 1 ELSE 0 END) AS lunch_applied,
+        SUM(CASE WHEN o.slot='DINNER' THEN 1 ELSE 0 END) AS dinner_applied,
+        SUM(CASE WHEN o.slot='LUNCH' AND o.status='PAID' THEN 1 ELSE 0 END) AS lunch_paid_cnt,
+        SUM(CASE WHEN o.slot='DINNER' AND o.status='PAID' THEN 1 ELSE 0 END) AS dinner_paid_cnt
+      FROM orders o
+      JOIN students s ON s.id = o.student_id
+      WHERE o.date BETWEEN ? AND ?
+        AND o.status IN ('SELECTED','PAID')
+      GROUP BY s.id, s.name, s.code
+      ORDER BY s.name ASC
+      `,
+      [start, end]
+    );
+
+    const list = rows.map((r) => {
+      const lunchApplied = Number(r.lunch_applied || 0) > 0;
+      const dinnerApplied = Number(r.dinner_applied || 0) > 0;
+      const lunchPaid =
+        lunchApplied &&
+        Number(r.lunch_paid_cnt || 0) === Number(r.lunch_applied || 0);
+      const dinnerPaid =
+        dinnerApplied &&
+        Number(r.dinner_paid_cnt || 0) === Number(r.dinner_applied || 0);
+      return {
+        id: r.id,
+        name: r.name,
+        code: r.code,
+        lunch: { applied: lunchApplied, paid: lunchPaid },
+        dinner: { applied: dinnerApplied, paid: dinnerPaid },
+      };
+    });
+
+    return res.json(list);
+  } catch (e) {
+    console.error("applicants-range error:", e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// 기간 내 결제표시 저장 (체크 → PAID / 해제 → SELECTED)
+app.post("/api/admin/payments/mark-range", async (req, res) => {
+  try {
+    const { start, end, items } = req.body || {};
+    if (!start || !end) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "start and end required" });
+    }
+    const list = Array.isArray(items) ? items : [];
+    if (!list.length) return res.json({ ok: true, updated: 0 });
+
+    let updated = 0;
+    for (const it of list) {
+      const code = String(it.code || "").trim();
+      const slot = String(it.slot || "").toUpperCase();
+      const paid = !!it.paid;
+      if (!code || (slot !== "LUNCH" && slot !== "DINNER")) continue;
+
+      const s = await get("SELECT id FROM students WHERE code=?", [code]);
+      if (!s) continue;
+
+      const newStatus = paid ? "PAID" : "SELECTED";
+      const r = await run(
+        `UPDATE orders
+           SET status=?
+         WHERE student_id=?
+           AND slot=?
+           AND date BETWEEN ? AND ?
+           AND status IN ('SELECTED','PAID')`,
+        [newStatus, s.id, slot, start, end]
+      );
+      updated += Number(r?.changes || 0);
+    }
+
+    return res.json({ ok: true, updated });
+  } catch (e) {
+    console.error("payments/mark-range error:", e);
+    return res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+/* ===============================
+   🔶 신청자(단일 날짜) 조회 / 저장 - Admin.jsx에서 사용
+   =============================== */
+
+// 단일 날짜 신청자 목록
+app.get("/api/admin/applicants", async (req, res) => {
+  try {
+    const { date } = req.query || {};
+    if (!date) return res.status(400).json({ ok: false, error: "date required" });
+
+    const rows = await all(
+      `
+      SELECT
+        s.id, s.name, s.code,
+        SUM(CASE WHEN o.slot='LUNCH'  THEN 1 ELSE 0 END) AS lunch_applied,
+        SUM(CASE WHEN o.slot='DINNER' THEN 1 ELSE 0 END) AS dinner_applied,
+        SUM(CASE WHEN o.slot='LUNCH'  AND o.status='PAID' THEN 1 ELSE 0 END) AS lunch_paid_cnt,
+        SUM(CASE WHEN o.slot='DINNER' AND o.status='PAID' THEN 1 ELSE 0 END) AS dinner_paid_cnt
+      FROM orders o
+      JOIN students s ON s.id=o.student_id
+     WHERE o.date=? AND o.status IN ('SELECTED','PAID')
+  GROUP BY s.id, s.name, s.code
+  ORDER BY s.name ASC
+      `,
+      [date]
+    );
+
+    const list = rows.map((r) => {
+      const lunchApplied = Number(r.lunch_applied || 0) > 0;
+      const dinnerApplied = Number(r.dinner_applied || 0) > 0;
+      const lunchPaid =
+        lunchApplied &&
+        Number(r.lunch_paid_cnt || 0) === Number(r.lunch_applied || 0);
+      const dinnerPaid =
+        dinnerApplied &&
+        Number(r.dinner_paid_cnt || 0) === Number(r.dinner_applied || 0);
+      return {
+        id: r.id,
+        name: r.name,
+        code: r.code,
+        lunch: { applied: lunchApplied, paid: lunchPaid },
+        dinner: { applied: dinnerApplied, paid: dinnerPaid },
+      };
+    });
+
+    return res.json(list);
+  } catch (e) {
+    console.error("applicants(date) error:", e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// 단일 날짜 결제 체크 저장
+app.post("/api/admin/payments/mark", async (req, res) => {
+  try {
+    const { date, items } = req.body || {};
+    if (!date) return res.status(400).json({ ok: false, error: "date required" });
+    const list = Array.isArray(items) ? items : [];
+    if (!list.length) return res.json({ ok: true, updated: 0 });
+
+    let updated = 0;
+
+    for (const it of list) {
+      const code = String(it.code || "").trim();
+      const slot = String(it.slot || "").toUpperCase();
+      const paid = !!it.paid;
+      if (!code || (slot !== "LUNCH" && slot !== "DINNER")) continue;
+
+      const s = await get("SELECT id FROM students WHERE code=?", [code]);
+      if (!s) continue;
+
+      const newStatus = paid ? "PAID" : "SELECTED";
+      const r = await run(
+        `UPDATE orders
+            SET status=?
+          WHERE student_id=? AND slot=? AND date=? AND status IN ('SELECTED','PAID')`,
+        [newStatus, s.id, slot, date]
+      );
+      updated += Number(r?.changes || 0);
+    }
+
+    return res.json({ ok: true, updated });
+  } catch (e) {
+    console.error("payments/mark (single) error:", e);
+    return res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 // ---------- Menu Images ----------
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
@@ -790,7 +1042,7 @@ app.post("/api/sms/summary", async (req, res) => {
         .status(400)
         .json({ ok: false, error: "INVALID_TO_NUMBER" });
 
-    // 집계
+    // 집계(중복 제거)
     const uniq = new Map();
     for (const it of items || []) {
       if (!it?.date) continue;
@@ -893,7 +1145,13 @@ console.log(
 
 app.use(express.static(PUBLIC_DIR));
 
-const SPA_ROUTES = ["/", "/admin", "/admin/print", "/payment/success", "/payment/fail"];
+const SPA_ROUTES = [
+  "/",
+  "/admin",
+  "/admin/print",
+  "/payment/success",
+  "/payment/fail",
+];
 SPA_ROUTES.forEach((routePath) => {
   app.get(routePath, (_req, res) => {
     res.sendFile(path.join(PUBLIC_DIR, "index.html"));

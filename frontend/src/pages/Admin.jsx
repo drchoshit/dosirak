@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { api, studentAPI, adminAPI } from '../lib/api';
-import { FileDown, Printer, Settings, CalendarDays, Trash2, LogOut, Save } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { FileDown, Printer, Settings, CalendarDays, Trash2, LogOut, Save, CheckSquare, Square } from 'lucide-react';
 
 const DAY_LABELS = ['일','월','화','수','목','금','토'];
 const DAY_CODES  = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
@@ -30,6 +29,14 @@ export default function Admin(){
   const [boSlot,setBoSlot]=useState('BOTH');
   const [search,setSearch]=useState('');
   const [saving, setSaving] = useState(false);
+
+  // --- 결제 체크(신청자) UI 상태 (기간 기반) ---
+  const [appStart, setAppStart] = useState('');
+  const [appEnd, setAppEnd] = useState('');
+  // rows: [{id,name,code,lunchApplied,lunchPaid,dinnerApplied,dinnerPaid}]
+  const [appRows, setAppRows] = useState([]);
+  const [appsLoading, setAppsLoading] = useState(false);
+  const [appsDirty, setAppsDirty] = useState(false);
 
   // ---- 최초 로그인 상태 확인 ----
   useEffect(() => {
@@ -187,6 +194,7 @@ export default function Admin(){
 
   // ✅ 전체 저장 (현재 테이블의 모든 학생을 일괄 업서트)
   async function bulkSave(){
+    if (!students?.length) { alert('저장할 학생이 없습니다.'); return; }
     try{
       setSaving(true);
       const studentsPayload = students
@@ -198,9 +206,10 @@ export default function Admin(){
         }))
         .filter(x=>x.name && x.code);
 
-      const { data } = await api.post('/admin/students/bulk-upsert', { students: studentsPayload });
+      const resp = await api.post('/admin/students/bulk-upsert', { students: studentsPayload });
+      const data = resp?.data || {};
       await load();
-      alert(`전체 저장 완료\n신규 ${data?.inserted ?? 0}건, 수정 ${data?.updated ?? 0}건, 스킵 ${data?.skipped ?? 0}건`);
+      alert(`전체 저장 완료\n신규 ${data?.inserted ?? 0}건, 수정 ${data?.updated ?? 0}건`);
     }catch(e){
       console.error(e?.response?.data || e);
       const detail = e?.response?.data?.error || e?.response?.data || e.message || 'Unknown error';
@@ -283,6 +292,88 @@ export default function Admin(){
   }
   const wd = (d)=> DAY_LABELS[new Date(d).getDay()];
 
+  // --- 인쇄: 날짜 받고 새 창으로 열기 (/admin/print?date=YYYY-MM-DD) ---
+  function openPrintDialog() {
+    const d = prompt('인쇄할 날짜를 YYYY-MM-DD 형식으로 입력하세요.');
+    if (!d) return;
+    const ok = /^\d{4}-\d{2}-\d{2}$/.test(d);
+    if (!ok) { alert('형식이 올바르지 않습니다. 예) 2025-09-01'); return; }
+    window.open(`/admin/print?date=${encodeURIComponent(d)}`, '_blank');
+  }
+
+  // -------------------
+  // 🔶 신청자 결제 체크 로직 (기간)
+  // -------------------
+  async function loadApplicantsRange(){
+    if(!appStart || !appEnd) { alert('시작일과 종료일을 선택하세요.'); return; }
+    setAppsLoading(true);
+    try{
+      console.log('[신청자 불러오기] GET /admin/applicants-range', { start: appStart, end: appEnd });
+      const { data } = await api.get('/admin/applicants-range', { params: { start: appStart, end: appEnd } });
+
+      // 백엔드 응답은 배열입니다: [{ id, name, code, lunch:{applied,paid}, dinner:{applied,paid} }]
+      const rows = (Array.isArray(data) ? data : []).map(r => ({
+        id: r.id,
+        name: r.name,
+        code: r.code,
+        lunchApplied: !!r?.lunch?.applied,
+        lunchPaid: !!r?.lunch?.paid,
+        dinnerApplied: !!r?.dinner?.applied,
+        dinnerPaid: !!r?.dinner?.paid
+      }));
+
+      console.log('[신청자 불러오기 결과] rows=', rows.length);
+      setAppRows(rows);
+      setAppsDirty(false);
+
+      if (!rows.length) alert('해당 기간에 신청자가 없습니다.');
+    }catch(e){
+      console.error(e);
+      alert('신청자 목록을 불러오지 못했습니다.');
+    }finally{
+      setAppsLoading(false);
+    }
+  }
+
+  function setPaid(rowIndex, slot, val){
+    setAppRows(list => list.map((r,i) => i===rowIndex ? {
+      ...r,
+      ...(slot === 'LUNCH' ? { lunchPaid: !!val } : {}),
+      ...(slot === 'DINNER' ? { dinnerPaid: !!val } : {}),
+    } : r));
+    setAppsDirty(true);
+  }
+
+  function bulkToggle(slot, value){
+    setAppRows(list => list.map(r => ({
+      ...r,
+      ...(slot === 'LUNCH' ? { lunchPaid: value && r.lunchApplied ? true : false } : {}),
+      ...(slot === 'DINNER' ? { dinnerPaid: value && r.dinnerApplied ? true : false } : {}),
+    })));
+    setAppsDirty(true);
+  }
+
+  async function saveApplicantsPaid(){
+    if (!appRows.length) return;
+    try{
+      const items = [];
+      appRows.forEach(r=>{
+        if (r.lunchApplied)  items.push({ code: r.code, slot: 'LUNCH',  paid: !!r.lunchPaid });
+        if (r.dinnerApplied) items.push({ code: r.code, slot: 'DINNER', paid: !!r.dinnerPaid });
+      });
+
+      console.log('[결제 저장] POST /admin/payments/mark-range', { start: appStart, end: appEnd, itemsCount: items.length });
+      await api.post('/admin/payments/mark-range', { start: appStart, end: appEnd, items });
+
+      setAppsDirty(false);
+      alert('변경사항을 저장했습니다.');
+      await loadApplicantsRange(); // 저장 후 새로고침
+    }catch(e){
+      console.error(e);
+      alert('저장에 실패했습니다.\n' + (e?.response?.data?.error || e.message || 'Unknown error'));
+    }
+  }
+
   // ===== 렌더링 =====
   if (isAuthed === null) {
     return (
@@ -321,30 +412,86 @@ export default function Admin(){
 
   return (
     <div className="space-y-6">
-      {/* 상단: 간소화 */}
+      {/* 상단 바 */}
       <div className="flex flex-wrap items-center gap-3 card p-4">
         <button className="btn-ghost" onClick={() => setShowStudents((s) => !s)}>학생 DB</button>
 
-        <Link to="/admin/print" className="btn-ghost">
+        {/* 🔄 인쇄: 날짜 입력 후 새 창 오픈 */}
+        <button className="btn-ghost" onClick={openPrintDialog} title="날짜 입력 후 인쇄 화면 열기">
           <Printer size={16} /> 인쇄
-        </Link>
-
-        <a className="btn-ghost" href="#"
-           onClick={async (e) => {
-             e.preventDefault();
-             const d = prompt("날짜(YYYY-MM-DD)");
-             if (!d) return;
-             window.location.href = "/api/admin/attendance.csv?date=" + d;
-           }}>
-          <FileDown size={16} /> CSV 다운로드
-        </a>
-
+        </button>
         <div className="grow" />
         <button className="btn-ghost" onClick={handleLogout} title="로그아웃">
           <LogOut size={16} /> 로그아웃
         </button>
       </div>
 
+      {/* 🟦 신청자 결제 체크 (기간) */}
+      <div className="card p-5">
+        <h2 className="font-bold text-lg">신청자 결제 체크</h2>
+        <div className="mt-2 flex flex-wrap gap-2 items-end">
+          <label className="text-sm">시작일
+            <input type="date" className="mt-1 input" value={appStart} onChange={e=>setAppStart(e.target.value)} />
+          </label>
+          <div className="pb-2">~</div>
+          <label className="text-sm">종료일
+            <input type="date" className="mt-1 input" value={appEnd} onChange={e=>setAppEnd(e.target.value)} />
+          </label>
+          <button className="btn" onClick={loadApplicantsRange} disabled={appsLoading}>
+            {appsLoading ? '불러오는 중…' : '신청자 불러오기'}
+          </button>
+
+          <div className="grow" />
+          <div className="flex gap-2">
+            <button className="btn-ghost" onClick={()=>bulkToggle('LUNCH', true)} title="점심 전체 체크"><CheckSquare size={16}/> 점심 전체</button>
+            <button className="btn-ghost" onClick={()=>bulkToggle('LUNCH', false)} title="점심 전체 해제"><Square size={16}/> 점심 해제</button>
+            <button className="btn-ghost" onClick={()=>bulkToggle('DINNER', true)} title="저녁 전체 체크"><CheckSquare size={16}/> 저녁 전체</button>
+            <button className="btn-ghost" onClick={()=>bulkToggle('DINNER', false)} title="저녁 전체 해제"><Square size={16}/> 저녁 해제</button>
+            <button className="btn-primary" disabled={!appsDirty || !appRows.length} onClick={saveApplicantsPaid}>
+              변경사항 저장
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-3 overflow-auto">
+          <table className="min-w-[720px] w-full text-sm border">
+            <thead className="bg-slate-50">
+              <tr>
+                <th className="p-2 border text-left">이름</th>
+                <th className="p-2 border text-left">코드</th>
+                <th className="p-2 border text-center">점심</th>
+                <th className="p-2 border text-center">저녁</th>
+              </tr>
+            </thead>
+            <tbody>
+              {appRows.map((r, idx) => (
+                <tr key={r.code} className="hover:bg-slate-50">
+                  <td className="p-2 border">{r.name}</td>
+                  <td className="p-2 border">{r.code}</td>
+                  <td className="p-2 border text-center">
+                    {r.lunchApplied ? (
+                      <input type="checkbox" checked={!!r.lunchPaid} onChange={e=>setPaid(idx,'LUNCH',e.target.checked)} />
+                    ) : <span className="text-slate-400">-</span>}
+                  </td>
+                  <td className="p-2 border text-center">
+                    {r.dinnerApplied ? (
+                      <input type="checkbox" checked={!!r.dinnerPaid} onChange={e=>setPaid(idx,'DINNER',e.target.checked)} />
+                    ) : <span className="text-slate-400">-</span>}
+                  </td>
+                </tr>
+              ))}
+              {appRows.length===0 && (
+                <tr><td className="p-4 border text-center text-slate-500" colSpan={4}>신청자가 없습니다. 기간을 선택하고 불러오기를 눌러주세요.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div className="text-xs text-slate-500 mt-2">
+          * 체크된 항목은 인쇄 시 <b>결제자 목록</b>에, 체크 해제된 항목은 <b>미결제자 목록</b>에 나타납니다.
+        </div>
+      </div>
+
+      {/* 학생 DB */}
       {showStudents && (
         <div className="card p-5">
           <div className="flex items-center justify-between gap-2">
@@ -355,7 +502,7 @@ export default function Admin(){
             </button>
           </div>
 
-          {/* 업로드/다운로드 + 학생 추가 (같은 줄 정렬) */}
+          {/* 업로드/다운로드 + 학생 추가 */}
           <div className="
             mt-3 grid gap-2 items-end
             sm:grid-cols-2

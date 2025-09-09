@@ -34,7 +34,7 @@ export default function Student(){
   const [selected, setSelected] = useState({});
   const [phone, setPhone] = useState('01022223333');
   const [smsPreview, setSmsPreview] = useState(null);
-  const [smsSent, setSmsSent] = useState(false);
+  const [smsSent, setSmsSent] = useState(true);
   const [showSmsRequire, setShowSmsRequire] = useState(false);
   const [lsReady, setLsReady] = useState(false); // 초기 복구 완료 플래그
 
@@ -146,10 +146,10 @@ export default function Student(){
   async function commit(){
     if(!code) return alert('코드를 먼저 입력하세요.');
     if(items.length===0) return alert('선택이 없습니다.');
-    if(!smsSent){ setShowSmsRequire(true); return; }
+    // 문자 확인 가드 제거: smsSent 여부와 모달 호출을 더 이상 체크하지 않습니다.
     try{
       await api.post('/orders/commit',{ code, items });
-      alert('선택 저장 완료');
+      alert('도시락 신청 완료(결재 전)');
     }catch{
       alert('저장에 실패했습니다. 잠시 후 다시 시도해 주세요.');
     }
@@ -198,7 +198,7 @@ export default function Student(){
   // 현재 코드의 임시 선택만 초기화
   function resetSelections(){
     setSelected({});
-    setSmsSent(false);
+    setSmsSent(true);
     setSmsPreview(null);
     const saved = readLS();
     const selections = saved.selections || {};
@@ -319,7 +319,7 @@ export default function Student(){
               </div>
 
               <div className="mt-4 flex flex-col gap-2">
-                <button className="btn-primary" onClick={commit}>선택 저장</button>
+                <button className="btn-primary" onClick={commit}>*필수클릭* 저장 및 제출하기</button>
 
                 <div className="flex gap-2">
                   <input

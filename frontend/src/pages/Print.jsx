@@ -1,3 +1,240 @@
-import React,{useState} from 'react';
-export default function Print(){ const [date,setDate]=useState(''); async function openPrint(){ if(!date) return alert('날짜를 선택'); const res=await fetch(`/api/admin/attendance?date=${date}`); const data=await res.json(); const w=window.open('','_blank'); w.document.write(`<html><head><title>${date} 명단</title><style>body{font-family:Pretendard,sans-serif;padding:12mm}.col{width:48%;display:inline-block;vertical-align:top}h1{font-size:20pt;margin:0 0 10pt 0}h2{font-size:14pt;margin:0 0 6pt 0}ul{list-style:none;padding:0;margin:0}li{padding:6pt 0;border-bottom:1px dashed #bbb;font-size:12pt}.circle{width:12pt;height:12pt;border:1.5pt solid #999;border-radius:999px;display:inline-block;margin-right:8pt}@media print{.noprint{display:none}}</style></head><body><div class="noprint"><button onclick="window.print()">인쇄</button></div><h1>${date} 도시락 명단</h1><div class="col"><h2>[점심 리스트]</h2><ul>${data.lunch.map(n=>`<li><span class="circle"></span>${n}</li>`).join('')}</ul></div><div class="col" style="margin-left:4%;"><h2>[저녁 리스트]</h2><ul>${data.dinner.map(n=>`<li><span class="circle"></span>${n}</li>`).join('')}</ul></div></body></html>`); w.document.close(); }
-  return (<div className="card p-5"><h1 className="text-xl font-bold mb-3">날짜별 명단 인쇄</h1><div className="flex gap-2 items-center"><input type="date" value={date} onChange={e=>setDate(e.target.value)} className="border rounded-xl px-3 py-2"/><button className="btn-ghost" onClick={openPrint}>열기/인쇄</button><a className="btn-ghost" href="#" onClick={e=>{e.preventDefault(); if(!date)return alert('날짜'); window.location.href='/api/admin/attendance.csv?date='+date;}}>CSV 다운로드</a></div></div>); }
+import React, { useEffect, useState, useCallback } from "react";
+
+export default function Print() {
+  const [date, setDate] = useState("");
+
+  // ?date= 파라미터 자동 반영 (자동-열기 X)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const d = params.get("date") || "";
+    if (d) setDate(d);
+  }, []);
+
+  // 개별 셀 HTML
+  const cellHtml = (item) => {
+    if (!item) return "&nbsp;"; // 빈칸 유지
+    const code = item.code ? ` <span class="code">(${item.code})</span>` : "";
+    const strongOpen = item.status === "PAID" ? "<strong>" : "";
+    const strongClose = item.status === "PAID" ? "</strong>" : "";
+    const badge =
+      item.status === "PAID"
+        ? ""
+        : ` <span class="badge-unpaid unpaid">미결제</span>`;
+    return `<span class="circle"></span>${strongOpen}${item.name}${code}${strongClose}${badge}`;
+  };
+
+  /**
+   * 인쇄용 새 창 열기
+   * @param {*} payload { date, lunch:[], dinner:[] }
+   * @param {'both'|'lunch'|'dinner'} mode
+   */
+  const openPrintWindow = useCallback((payload, mode = "both") => {
+    const { date, lunch = [], dinner = [] } = payload || {};
+
+    const makeRowsTwoCols = () => {
+      const len = Math.max(lunch.length, dinner.length);
+      return Array.from({ length: len })
+        .map((_, i) => {
+          const L = lunch[i];
+          const D = dinner[i];
+          return `
+            <tr>
+              <td class="cell">${cellHtml(L)}</td>
+              <td class="cell">${cellHtml(D)}</td>
+            </tr>`;
+        })
+        .join("");
+    };
+
+    const makeRowsOneCol = (arr) => {
+      const len = Math.max(arr.length, 15); // 인쇄 높이 안정화용 여백
+      return Array.from({ length: len })
+        .map((_, i) => {
+          const it = arr[i];
+          return `<tr><td class="cell">${cellHtml(it)}</td></tr>`;
+        })
+        .join("");
+    };
+
+    // 레이아웃 HTML
+    const tablesHtml =
+      mode === "both"
+        ? `
+      <table>
+        <thead>
+          <tr>
+            <th>점심 리스트</th>
+            <th>저녁 리스트</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${makeRowsTwoCols() || '<tr><td class="cell">&nbsp;</td><td class="cell">&nbsp;</td></tr>'}
+        </tbody>
+      </table>
+    `
+        : `
+      <table class="single">
+        <thead>
+          <tr>
+            <th>${mode === "lunch" ? "점심" : "저녁"} 리스트</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            makeRowsOneCol(mode === "lunch" ? lunch : dinner) ||
+            '<tr><td class="cell">&nbsp;</td></tr>'
+          }
+        </tbody>
+      </table>
+    `;
+
+    const w = window.open("", "_blank");
+    if (!w) return;
+
+    w.document.write(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>${date} 도시락 명단${mode !== "both" ? " - " + (mode === "lunch" ? "점심" : "저녁") : ""}</title>
+  <style>
+    *{box-sizing:border-box}
+    body{font-family:Pretendard,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;padding:12mm;}
+    .toolbar{margin-bottom:8mm; display:flex; gap:8px}
+    .btn{
+      display:inline-block; padding:14pt 22pt; font-size:14pt; font-weight:700;
+      background:#111; color:#fff; border:none; border-radius:12px; cursor:pointer;
+      box-shadow:0 10px 22px rgba(0,0,0,.12);
+    }
+    .btn-ghost{
+      display:inline-block; padding:12pt 18pt; font-size:13pt; font-weight:700;
+      background:#f6f7fb; color:#1f2937; border:1px solid #e5e7eb; border-radius:12px; cursor:pointer;
+    }
+    h1{font-size:22pt;margin:0 0 10pt 0}
+    .subtitle{color:#6b7280; margin-bottom:4mm; font-size:11pt}
+    table{width:100%; border-collapse:collapse; table-layout:fixed;}
+    th{font-size:15pt; text-align:center; padding:10pt 8pt; border:2px solid #999; background:#f7f7f9;}
+    td.cell{font-size:13pt; padding:8pt 10pt; border:1px dashed #bbb; height:28pt; vertical-align:middle;}
+    table.single td.cell { height:28pt; }
+    .circle{width:12pt;height:12pt;border:1.5pt solid #777;border-radius:999px;display:inline-block;margin-right:8pt;vertical-align:middle}
+    .code{color:#888;font-size:10pt}
+    .badge-unpaid{
+      display:inline-block; margin-left:8pt; padding:2pt 6pt; font-size:10pt; color:#8a2a2a;
+      border:1px solid #e7baba; border-radius:6px; background:#fff2f2;
+    }
+    /* 토글: 미결제 숨김 */
+    .hide-unpaid .badge-unpaid { display:none !important; }
+
+    @media print {
+      .toolbar{ display:none }
+      body { padding:8mm; }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button class="btn" onclick="window.print()">🖨️ 인쇄하기</button>
+    <button class="btn-ghost" id="toggleUnpaidBtn">미결제 숨기기</button>
+  </div>
+  <h1>${date} 도시락 명단${
+      mode !== "both" ? " — " + (mode === "lunch" ? "점심" : "저녁") : ""
+    }</h1>
+  ${
+    mode === "both"
+      ? `<div class="subtitle">양쪽 표가 동시에 인쇄됩니다. 필요한 경우 한쪽만 인쇄하려면 창을 닫고 점심/저녁 단일 버튼을 사용하세요.</div>`
+      : ""
+  }
+  ${tablesHtml}
+
+  <script>
+    (function(){
+      var hidden = false;
+      var btn = document.getElementById('toggleUnpaidBtn');
+      btn.addEventListener('click', function(){
+        hidden = !hidden;
+        document.body.classList.toggle('hide-unpaid', hidden);
+        btn.textContent = hidden ? '미결제 보이기' : '미결제 숨기기';
+      });
+    })();
+  </script>
+</body>
+</html>`);
+    w.document.close();
+  }, []);
+
+  // 서버에서 데이터 받아 새 창 열기
+  const openPrint = useCallback(
+    async (mode = "both") => {
+      if (!date) return alert("날짜를 선택하세요.");
+      const ok = /^\d{4}-\d{2}-\d{2}$/.test(date);
+      if (!ok) return alert("형식이 올바르지 않습니다. 예) 2025-09-05");
+
+      try {
+        const res = await fetch(
+          `/api/admin/print?date=${encodeURIComponent(date)}`
+        );
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json(); // { ok, date, lunch:[{name,code,status}], dinner:[...] }
+        if (!data?.ok) throw new Error(data?.error || "invalid response");
+        openPrintWindow(data, mode);
+      } catch (e) {
+        console.error(e);
+        alert("인쇄용 데이터를 불러오지 못했습니다.\n" + (e.message || e));
+      }
+    },
+    [date, openPrintWindow]
+  );
+
+  // 🔧 자동 열기 비활성화 (기본). 필요하면 /admin/print?date=YYYY-MM-DD&auto=1&mode=lunch|dinner|both 로만 자동 열기
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const auto = params.get("auto");
+    const modeParam = (params.get("mode") || "both").toLowerCase();
+    const mode =
+      modeParam === "lunch" || modeParam === "dinner" ? modeParam : "both";
+    if (date && auto === "1") {
+      const t = setTimeout(() => openPrint(mode), 50);
+      return () => clearTimeout(t);
+    }
+  }, [date, openPrint]);
+
+  return (
+    <div className="card p-5">
+      <h1 className="text-xl font-bold mb-3">날짜별 명단 인쇄</h1>
+      <div className="flex flex-wrap gap-3 items-center">
+        <input
+          type="date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          className="border rounded-xl px-3 py-2"
+        />
+
+        {/* 양쪽(점심+저녁) 인쇄 */}
+        <button
+          className="btn-primary text-lg px-6 py-3 rounded-xl"
+          onClick={() => openPrint("both")}
+          title="인쇄용 창을 열고 인쇄합니다 (양쪽)"
+        >
+          🖨️ 양쪽 열기/인쇄
+        </button>
+
+        {/* 점심만 인쇄 */}
+        <button
+          className="btn text-lg px-4 py-3 rounded-xl border"
+          onClick={() => openPrint("lunch")}
+          title="점심만 인쇄"
+        >
+          점심 인쇄
+        </button>
+
+        {/* 저녁만 인쇄 */}
+        <button
+          className="btn text-lg px-4 py-3 rounded-xl border"
+          onClick={() => openPrint("dinner")}
+          title="저녁만 인쇄"
+        >
+          저녁 인쇄
+        </button>
+      </div>
+    </div>
+  );
+}
