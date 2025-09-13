@@ -92,20 +92,6 @@ const TMP_DIR = path.join(UPLOAD_DIR, "tmp");
 fs.mkdirSync(TMP_DIR, { recursive: true });
 const uploadExcel = multer({ dest: TMP_DIR });
 
-// ---------- DB Migration (sms_extra_text 자동) ----------
-(async () => {
-  try {
-    const cols = await all("PRAGMA table_info(policy)");
-    const hasCol = cols.some((c) => c.name === "sms_extra_text");
-    if (!hasCol) {
-      await run("ALTER TABLE policy ADD COLUMN sms_extra_text TEXT");
-      console.log("DB migrated: sms_extra_text column added to policy table");
-    }
-  } catch (e) {
-    console.error("DB migration check failed:", e);
-  }
-})();
-
 // Health
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
