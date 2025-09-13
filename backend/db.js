@@ -3,41 +3,47 @@ import initSqlJs from "sql.js";
 import fs from "fs";
 import path from "path";
 
-// ✅ Render Persistent Disk 우선 사용
-const DB_PATH =
-  process.env.DB_PATH ||
-  path.join("/data", "data.sqlite"); // /data는 Render Disk의 기본 마운트 경로
+// ✅ 안전한 저장 경로 결정: /data(디스크) 있으면 사용, 없으면 앱 폴더
+const PERSIST_DIR = process.env.DB_DIR
+  || (fs.existsSync("/data") ? "/data" : process.cwd());
+const DB_PATH = process.env.DB_PATH || path.join(PERSIST_DIR, "data.sqlite");
 
 let SQL = null;
 let db = null;
 
+/** DB 핸들 (초기화 + 스키마/마이그레이션) */
 export async function getDB() {
   if (db) return db;
+
+  // sql.js 초기화
   SQL = await initSqlJs();
+
+  // 디렉토리 보장
+  try { fs.mkdirSync(path.dirname(DB_PATH), { recursive: true }); } catch {}
 
   if (fs.existsSync(DB_PATH)) {
     const buf = fs.readFileSync(DB_PATH);
     db = new SQL.Database(new Uint8Array(buf));
-    await runMigrations();      // 기존 파일도 마이그레이션
+    await runMigrations();   // 기존 파일에도 마이그레이션 적용
     await persist();
   } else {
-    // 폴더가 없을 수도 있으니 보장
-    try { fs.mkdirSync(path.dirname(DB_PATH), { recursive: true }); } catch {}
     db = new SQL.Database();
-    bootstrap();                // 신규 스키마
+    bootstrap();             // 신규 스키마
     await persist();
   }
   return db;
 }
 
+/** 디스크에 저장 */
 export async function persist() {
   if (!db) return;
-  const data = db.export();
+  // 디렉토리 보장(재확인)
   try { fs.mkdirSync(path.dirname(DB_PATH), { recursive: true }); } catch {}
+  const data = db.export();
   fs.writeFileSync(DB_PATH, Buffer.from(data));
 }
 
-// 초기 스키마
+/** 최초 스키마 */
 function bootstrap() {
   db.run(`
     PRAGMA foreign_keys=ON;
@@ -71,16 +77,15 @@ function bootstrap() {
       uploaded_at TEXT NOT NULL
     );
 
-    -- ✅ updated_at 포함
     CREATE TABLE IF NOT EXISTS orders(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       student_id INTEGER NOT NULL,
       date TEXT NOT NULL,
-      slot TEXT NOT NULL,
+      slot TEXT NOT NULL,         -- 'LUNCH' | 'DINNER'
       price INTEGER NOT NULL,
       status TEXT NOT NULL,       -- 'SELECTED' | 'PAID'
       created_at TEXT NOT NULL,
-      updated_at TEXT,            -- <- 새로 추가
+      updated_at TEXT,            -- ✅
       FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_orders_date_slot
@@ -91,16 +96,16 @@ function bootstrap() {
     CREATE TABLE IF NOT EXISTS blackout(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       date TEXT NOT NULL,
-      slot TEXT NOT NULL
+      slot TEXT NOT NULL          -- 'BOTH' | 'LUNCH' | 'DINNER'
     );
 
-    -- (권장) 중복 신청 방지: 학생+날짜+슬롯 유니크
+    -- ✅ 학생+날짜+슬롯 중복 방지
     CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_unique
       ON orders(student_id, date, slot);
   `);
 }
 
-// 마이그레이션: 누락 컬럼/인덱스 보강
+/** 마이그레이션 */
 async function runMigrations() {
   // policy.sms_extra_text
   const policyCols = await all("PRAGMA table_info(policy)");
@@ -114,15 +119,16 @@ async function runMigrations() {
     db.run(`ALTER TABLE orders ADD COLUMN updated_at TEXT;`);
   }
 
-  // orders 유니크 인덱스
-  const idxRows = await all(`PRAGMA index_list('orders')`);
-  const hasUx = idxRows.some(r => String(r.name || '').toLowerCase() === 'ux_orders_unique');
+  // 유니크 인덱스
+  const idxs = await all(`PRAGMA index_list('orders')`);
+  const hasUx = idxs.some(r => String(r.name || '').toLowerCase() === 'ux_orders_unique');
   if (!hasUx) {
     db.run(`CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_unique
             ON orders(student_id, date, slot);`);
   }
 }
 
+/** SELECT 다건 */
 export async function all(sql, params = []) {
   const d = await getDB();
   const stmt = d.prepare(sql);
@@ -136,11 +142,13 @@ export async function all(sql, params = []) {
   }
 }
 
+/** SELECT 단건 */
 export async function get(sql, params = []) {
   const rows = await all(sql, params);
   return rows[0] || null;
 }
 
+/** 변경계 실행 후 즉시 영속화 */
 export async function run(sql, params = []) {
   const d = await getDB();
   const stmt = d.prepare(sql);
