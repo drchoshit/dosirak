@@ -21,7 +21,7 @@ const app = express();
 const PORT = Number(process.env.PORT) || 5000;
 
 // ---------- App & Middlewares ----------
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "5mb" }));
 app.use(
   cors({
     origin: process.env.CORS_ORIGIN?.split(",") || true,
@@ -564,16 +564,112 @@ app.get("/api/policy/active", async (req, res) => {
 });
 
 // ---------- Orders / Payments ----------
+
+// ✅ 신규: 현재 주문 조회 (기간/학생/검색)
+app.get("/api/orders", async (req, res) => {
+  try {
+    const { start, end, studentId, code, q } = req.query || {};
+    let sid = studentId;
+
+    // code로 들어오면 id 변환
+    if (!sid && code) {
+      const s = await get("SELECT id FROM students WHERE code=?", [String(code).trim()]);
+      if (s) sid = s.id;
+    }
+
+    const where = ["o.status IN ('SELECTED','PAID')"];
+    const params = [];
+    if (start) { where.push("o.date >= ?"); params.push(start); }
+    if (end)   { where.push("o.date <= ?"); params.push(end); }
+    if (sid)   { where.push("o.student_id = ?"); params.push(sid); }
+    if (q && String(q).trim()) {
+      where.push("(s.name LIKE ? OR s.code LIKE ?)");
+      params.push(`%${q}%`, `%${q}%`);
+    }
+
+    const rows = await all(
+      `
+      SELECT o.student_id, s.code, s.name, o.date, o.slot, o.price, o.status
+        FROM orders o
+        JOIN students s ON s.id = o.student_id
+       ${where.length ? "WHERE " + where.join(" AND ") : ""}
+       ORDER BY o.date, o.slot, s.name
+      `,
+      params
+    );
+
+    res.json({ ok: true, rows });
+  } catch (e) {
+    console.error("GET /api/orders error:", e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ✅ 신규: 주문 벌크 업서트
+// body: { orders: [ {code or student_id, date, slot, price, status?} ] }
+app.post("/api/orders/bulk-upsert", async (req, res) => {
+  try {
+    const orders = Array.isArray(req.body?.orders) ? req.body.orders : [];
+    if (!orders.length) return res.json({ ok: true, count: 0 });
+
+    let count = 0;
+    for (const o of orders) {
+      let sid = o.student_id;
+      if (!sid && o.code) {
+        const s = await get("SELECT id FROM students WHERE code=?", [String(o.code).trim()]);
+        if (s) sid = s.id;
+      }
+      const date = String(o.date || "").trim();
+      const slot = String(o.slot || "").toUpperCase();
+      const price = Number(o.price || 0);
+      const status = (String(o.status || "SELECTED").toUpperCase() === "PAID") ? "PAID" : "SELECTED";
+      if (!sid || !date || (slot !== "LUNCH" && slot !== "DINNER")) continue;
+
+      await run(
+        `
+        INSERT INTO orders(student_id, date, slot, price, status, created_at, updated_at)
+        VALUES(?,?,?,?,?, datetime('now'), datetime('now'))
+        ON CONFLICT(student_id, date, slot)
+        DO UPDATE SET
+          price=excluded.price,
+          status=excluded.status,
+          updated_at=datetime('now')
+        `,
+        [sid, date, slot, price, status]
+      );
+      count++;
+    }
+
+    res.json({ ok: true, count });
+  } catch (e) {
+    console.error("POST /api/orders/bulk-upsert error:", e);
+    res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// 학생 사이트에서 선택 커밋 — ⚙️ UPSERT 로 변경하여 중복 방지
 app.post("/api/orders/commit", async (req, res) => {
   const { code, items } = req.body || {};
   const s = await get("SELECT * FROM students WHERE code=?", [code]);
   if (!s) return res.status(404).json({ error: "student not found" });
 
-  const now = dayjs().toISOString();
   for (const it of items || []) {
+    const date = String(it.date || "").trim();
+    const slot = String(it.slot || "").toUpperCase();
+    const price = Number(it.price || 0);
+    if (!date || (slot !== "LUNCH" && slot !== "DINNER")) continue;
+
     await run(
-      "INSERT INTO orders(student_id,date,slot,price,status,created_at) VALUES(?,?,?,?,?,?)",
-      [s.id, it.date, it.slot, it.price, "SELECTED", now]
+      `
+      INSERT INTO orders(student_id, date, slot, price, status, created_at, updated_at)
+      VALUES(?,?,?,?, 'SELECTED', datetime('now'), datetime('now'))
+      ON CONFLICT(student_id, date, slot)
+      DO UPDATE SET
+        price=excluded.price,
+        status='SELECTED',
+        updated_at=datetime('now')
+      `,
+      [s.id, date, slot, price]
     );
   }
   res.json({ ok: true });
@@ -599,9 +695,20 @@ app.post("/api/payments/toss/confirm", async (req, res) => {
     const s = await get("SELECT * FROM students WHERE code=?", [code]);
     if (s && Array.isArray(dateslots)) {
       for (const it of dateslots) {
+        const date = String(it.date || "").trim();
+        const slot = String(it.slot || "").toUpperCase();
+        if (!date || (slot !== "LUNCH" && slot !== "DINNER")) continue;
+
         await run(
-          'UPDATE orders SET status="PAID" WHERE student_id=? AND date=? AND slot=?',
-          [s.id, it.date, it.slot]
+          `
+          INSERT INTO orders(student_id, date, slot, price, status, created_at, updated_at)
+          VALUES(?,?,?,?, 'PAID', datetime('now'), datetime('now'))
+          ON CONFLICT(student_id, date, slot)
+          DO UPDATE SET
+            status='PAID',
+            updated_at=datetime('now')
+          `,
+          [s.id, date, slot, Number(it.price || 0)]
         );
       }
     }
@@ -678,7 +785,7 @@ app.get("/api/admin/orders", async (req, res) => {
   }
 });
 
-// 개별 끼 취소(삭제) — 상태와 무관(SELECTED/PAID 전부 삭제 가능)
+// 개별 끼 취소(삭제)
 app.delete("/api/admin/orders/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -690,7 +797,7 @@ app.delete("/api/admin/orders/:id", async (req, res) => {
   }
 });
 
-// 학생 단위 일괄 취소 — 상태와 무관(선택 기간/슬롯 조건에 맞는 모든 주문 삭제)
+// 학생 단위 일괄 취소
 app.post("/api/admin/orders/cancel-student", async (req, res) => {
   try {
     const { code, start, end, slot } = req.body || {};

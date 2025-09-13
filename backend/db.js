@@ -92,36 +92,47 @@ function bootstrap() {
       date TEXT NOT NULL,
       slot TEXT NOT NULL,         -- 'LUNCH' | 'DINNER'
       price INTEGER NOT NULL,
-      status TEXT NOT NULL,       -- 'SELECTED' | 'PAID'
-      created_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'SELECTED',  -- 'SELECTED' | 'PAID'
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE
     );
+
+    -- 조회/유일성 인덱스
     CREATE INDEX IF NOT EXISTS idx_orders_date_slot
       ON orders(date, slot, status);
     CREATE INDEX IF NOT EXISTS idx_orders_student_date
       ON orders(student_id, date);
-
-    -- 미제공(블랙아웃) 일자
-    CREATE TABLE IF NOT EXISTS blackout(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      date TEXT NOT NULL,
-      slot TEXT NOT NULL          -- 'BOTH' | 'LUNCH' | 'DINNER'
-    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_orders_student_date_slot
+      ON orders(student_id, date, slot);
   `);
 }
 
 /**
  * 마이그레이션:
  * - policy.sms_extra_text 없으면 추가
+ * - orders.updated_at 없으면 추가
+ * - orders(student_id,date,slot) UNIQUE 인덱스 없으면 생성
  */
 async function runMigrations() {
-  // table_info(policy) 조회
-  const cols = await all("PRAGMA table_info(policy)");
-  const hasSmsExtra = cols.some((c) => c.name === "sms_extra_text");
-
-  if (!hasSmsExtra) {
-    // sql.js도 ALTER TABLE ADD COLUMN 지원
+  // policy.sms_extra_text
+  let cols = await all("PRAGMA table_info(policy)");
+  if (!cols.some((c) => c.name === "sms_extra_text")) {
     db.run(`ALTER TABLE policy ADD COLUMN sms_extra_text TEXT;`);
+  }
+
+  // orders.updated_at
+  cols = await all("PRAGMA table_info(orders)");
+  if (!cols.some((c) => c.name === "updated_at")) {
+    db.run(`ALTER TABLE orders ADD COLUMN updated_at TEXT DEFAULT (datetime('now'));`);
+  }
+
+  // UNIQUE 인덱스 확인/생성
+  const idxRows = await all("PRAGMA index_list('orders')");
+  const hasUq = idxRows.some(r => (r.name || '').toLowerCase() === 'uq_orders_student_date_slot');
+  if (!hasUq) {
+    db.run(`CREATE UNIQUE INDEX IF NOT EXISTS uq_orders_student_date_slot
+            ON orders(student_id, date, slot);`);
   }
 }
 

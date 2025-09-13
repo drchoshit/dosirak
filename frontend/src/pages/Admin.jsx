@@ -1,3 +1,4 @@
+// frontend/src/pages/Admin.jsx
 import React, { useEffect, useMemo, useState } from 'react';
 import { api, studentAPI, adminAPI } from '../lib/api';
 import { Printer, Settings, CalendarDays, Trash2, LogOut, Save, CheckSquare, Square } from 'lucide-react';
