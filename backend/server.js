@@ -20,16 +20,42 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = Number(process.env.PORT) || 5000;
 
-// ---------- App & Middlewares ----------
-app.use(express.json({ limit: "2mb" }));
-app.use(
-  cors({
-    origin: process.env.CORS_ORIGIN?.split(",") || true,
-    credentials: true,
-  })
-);
+/* ===============================
+   App & Middlewares
+   =============================== */
 
-// ---------- Admin Auth (cookie) ----------
+// ✅ 프록시(Render 등) 뒤에서 Secure 쿠키 신뢰
+app.set("trust proxy", 1);
+
+// 허용 오리진 목록 (콤마로 구분해 ENV에 지정)
+// 예: CORS_ORIGIN=https://medieats.kr,https://www.medieats.kr
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
+// CORS 옵션 함수: 정확한 오리진만 허용 + 쿠키 전달
+const corsOptions = {
+  origin(origin, cb) {
+    // 서버측/헬스체크 등 Origin 없는 요청 허용
+    if (!origin) return cb(null, true);
+    if (ALLOWED_ORIGINS.length === 0) return cb(null, true); // 미설정 시 개방
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error("Not allowed by CORS: " + origin));
+  },
+  credentials: true,
+};
+
+app.use(cors(corsOptions));
+// 프리플라이트 명시 처리(일부 프록시 환경에서 안정성 ↑)
+app.options("*", cors(corsOptions));
+
+app.use(express.json({ limit: "2mb" }));
+
+/* ===============================
+   Admin Auth (cookie)
+   =============================== */
+
 const ADMIN_USER = process.env.ADMIN_USER || "medicalsoap";
 const ADMIN_PASS = process.env.ADMIN_PASS || "ghfkdskql2827";
 const ADMIN_SECRET =
@@ -38,10 +64,10 @@ const ADMIN_SECRET =
 const ADMIN_COOKIE_NAME = "admintoken";
 const IS_PROD = process.env.NODE_ENV === "production";
 
-// ✅ 배포환경(다른 도메인 간 쿠키 전송) 대비
+// 배포환경(크로스 도메인 쿠키) 대비 쿠키 옵션
 const COOKIE_SAMESITE = IS_PROD ? "none" : "lax";
 const COOKIE_SECURE = IS_PROD ? true : false;
-// (선택) 같은 2차 도메인으로 묶었을 때만 사용: ex) .medieats.kr
+// 같은 최상위 도메인으로만 묶고 싶을 때 설정(예: .medieats.kr). 필요 없으면 미설정
 const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || undefined;
 
 app.use(cookieParser(ADMIN_SECRET));
@@ -53,11 +79,11 @@ app.post("/api/admin/login", (req, res) => {
   }
   res.cookie(ADMIN_COOKIE_NAME, "1", {
     httpOnly: true,
-    sameSite: COOKIE_SAMESITE, // ← 변경
-    secure: COOKIE_SECURE,     // ← 변경
+    sameSite: COOKIE_SAMESITE,
+    secure: COOKIE_SECURE,
     signed: true,
     path: "/",
-    domain: COOKIE_DOMAIN,     // ← (옵션)
+    domain: COOKIE_DOMAIN,
     maxAge: 1000 * 60 * 60 * 24 * 7,
   });
   return res.json({ ok: true });
@@ -71,11 +97,11 @@ app.get("/api/admin/me", (req, res) => {
 app.post("/api/admin/logout", (req, res) => {
   res.clearCookie(ADMIN_COOKIE_NAME, {
     httpOnly: true,
-    sameSite: COOKIE_SAMESITE, // ← 변경
-    secure: COOKIE_SECURE,     // ← 변경
+    sameSite: COOKIE_SAMESITE,
+    secure: COOKIE_SECURE,
     signed: true,
     path: "/",
-    domain: COOKIE_DOMAIN,     // ← (옵션)
+    domain: COOKIE_DOMAIN,
   });
   return res.json({ ok: true });
 });
@@ -89,7 +115,9 @@ function adminAuth(req, res, next) {
 }
 app.use("/api/admin", adminAuth);
 
-// Uploads
+/* ===============================
+   Uploads
+   =============================== */
 const UPLOAD_DIR =
   process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -100,7 +128,9 @@ const TMP_DIR = path.join(UPLOAD_DIR, "tmp");
 fs.mkdirSync(TMP_DIR, { recursive: true });
 const uploadExcel = multer({ dest: TMP_DIR });
 
-// ---------- DB Migration (sms_extra_text 자동) ----------
+/* ===============================
+   DB Migration (sms_extra_text 자동)
+   =============================== */
 (async () => {
   try {
     const cols = await all("PRAGMA table_info(policy)");
@@ -117,7 +147,9 @@ const uploadExcel = multer({ dest: TMP_DIR });
 // Health
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
-// ---------- Helpers for Excel header/phone ----------
+/* ===============================
+   Helpers for Excel header/phone
+   =============================== */
 const onlyDigits = (s = "") => String(s).replace(/\D/g, "");
 
 function normalizePhone(raw = "") {
@@ -197,7 +229,10 @@ function parseExcelBufferToStudents(buf) {
   return out;
 }
 
-// ---------- Students: import/export & CRUD ----------
+/* ===============================
+   Students: import/export & CRUD
+   =============================== */
+
 // CSV import (기존 유지)
 app.post(
   "/api/admin/students/import",
@@ -365,7 +400,7 @@ app.get("/api/admin/students", async (_req, res) =>
   res.json(await all("SELECT * FROM students ORDER BY name"))
 );
 
-// ---------- 단건 upsert ----------
+// 단건 upsert
 app.post("/api/admin/students", async (req, res) => {
   const { name, code, phone, parent_phone } = req.body || {};
   if (!name || !code) {
@@ -422,7 +457,7 @@ app.get("/api/admin/students/export", async (_req, res) => {
   res.send(header + body);
 });
 
-// ---------- 전체 저장(일괄 upsert) ----------
+// 전체 저장(일괄 upsert)
 app.post("/api/admin/students/bulk-upsert", async (req, res) => {
   const list = Array.isArray(req.body?.students) ? req.body.students : [];
   if (!list.length) return res.json({ ok: true, inserted: 0, updated: 0 });
@@ -463,7 +498,10 @@ app.post("/api/admin/students/bulk-upsert", async (req, res) => {
   }
 });
 
-// ---------- Global Policy ----------
+/* ===============================
+   Global Policy
+   =============================== */
+
 app.get("/api/admin/policy", async (_req, res) =>
   res.json(await get("SELECT * FROM policy WHERE id=1"))
 );
@@ -501,7 +539,9 @@ app.post("/api/admin/student-policy/:id", async (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- Blackout ----------
+/* ===============================
+   Blackout
+   =============================== */
 app.get("/api/admin/no-service-days", async (_req, res) => {
   const rows = await all("SELECT * FROM blackout ORDER BY date, slot");
   res.json(rows);
@@ -519,7 +559,9 @@ app.delete("/api/admin/no-service-days/:id", async (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- Active Policy (Student Page) ----------
+/* ===============================
+   Active Policy (Student Page)
+   =============================== */
 app.get("/api/policy/active", async (req, res) => {
   const code = req.query.code;
   if (!code) return res.status(400).json({ error: "code required" });
@@ -571,7 +613,9 @@ app.get("/api/policy/active", async (req, res) => {
   });
 });
 
-// ---------- Orders / Payments ----------
+/* ===============================
+   Orders / Payments
+   =============================== */
 app.post("/api/orders/commit", async (req, res) => {
   const { code, items } = req.body || {};
   const s = await get("SELECT * FROM students WHERE code=?", [code]);
@@ -623,12 +667,10 @@ app.post("/api/payments/toss/confirm", async (req, res) => {
 });
 
 /* ===============================
-   🔷 Admin: Orders List & Cancellation
+   Admin: Orders List & Cancellation
    =============================== */
 
 // 신청 리스트 조회
-// GET /api/admin/orders?start=YYYY-MM-DD&end=YYYY-MM-DD&q=검색어
-// status IN ('SELECTED','PAID')를 조회(둘 다 보여줌)
 app.get("/api/admin/orders", async (req, res) => {
   try {
     const { start, end, q } = req.query || {};
@@ -686,7 +728,7 @@ app.get("/api/admin/orders", async (req, res) => {
   }
 });
 
-// 개별 끼 취소(삭제) — 상태와 무관(SELECTED/PAID 전부 삭제 가능)
+// 개별 끼 취소(삭제)
 app.delete("/api/admin/orders/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -698,7 +740,7 @@ app.delete("/api/admin/orders/:id", async (req, res) => {
   }
 });
 
-// 학생 단위 일괄 취소 — 상태와 무관(선택 기간/슬롯 조건에 맞는 모든 주문 삭제)
+// 학생 단위 일괄 취소
 app.post("/api/admin/orders/cancel-student", async (req, res) => {
   try {
     const { code, start, end, slot } = req.body || {};
@@ -724,7 +766,9 @@ app.post("/api/admin/orders/cancel-student", async (req, res) => {
   }
 });
 
-// ---------- Weekly Summary ----------
+/* ===============================
+   Weekly Summary
+   =============================== */
 app.get("/api/admin/weekly-summary", async (req, res) => {
   const { start, end } = req.query;
   if (!start || !end)
@@ -786,7 +830,9 @@ app.get("/api/admin/weekly-summary", async (req, res) => {
   res.json({ start, end, days, rows, applied, notApplied });
 });
 
-// ---------- Attendance CSV ----------
+/* ===============================
+   Attendance CSV
+   =============================== */
 app.get("/api/admin/attendance.csv", async (req, res) => {
   const { date } = req.query;
   if (!date) return res.status(400).json({ error: "date required" });
@@ -826,7 +872,9 @@ app.get("/api/admin/attendance.csv", async (req, res) => {
   res.send(csv);
 });
 
-// ---------- 인쇄용 JSON API (단일 날짜, 중복 제거) ----------
+/* ===============================
+   인쇄용 JSON API (단일 날짜, 중복 제거)
+   =============================== */
 app.get("/api/admin/print", async (req, res) => {
   const { date } = req.query;
   if (!date) return res.status(400).json({ ok: false, error: "date required" });
@@ -886,7 +934,7 @@ app.get("/api/admin/print", async (req, res) => {
 });
 
 /* ===============================
-   🔶 신청자(기간) 조회 / 저장 — 학생 단일 체크(점/저 묶음)
+   신청자(기간) 조회 / 저장 — 학생 단일 체크(점/저 묶음)
    =============================== */
 
 // 기간 내 신청자 목록(학생 단위 집계)
@@ -994,7 +1042,7 @@ app.post("/api/admin/payments/mark-range", async (req, res) => {
 });
 
 /* ===============================
-   🔶 신청자(단일 날짜) 조회 / 저장 - (하위호환)
+   신청자(단일 날짜) 조회 / 저장 - (하위호환)
    =============================== */
 
 // 단일 날짜 신청자 목록
@@ -1081,7 +1129,9 @@ app.post("/api/admin/payments/mark", async (req, res) => {
   }
 });
 
-// ---------- Menu Images ----------
+/* ===============================
+   Menu Images
+   =============================== */
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
   filename: (_req, file, cb) =>
@@ -1125,7 +1175,9 @@ app.delete("/api/admin/menu-images/:id", async (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- SMS ----------
+/* ===============================
+   SMS
+   =============================== */
 function createSolapiAuthHeader(apiKey, apiSecret) {
   const date = new Date().toISOString();
   const salt = crypto.randomBytes(16).toString("hex");
@@ -1251,7 +1303,9 @@ app.post("/api/sms/summary", async (req, res) => {
   }
 });
 
-// ---------- Static / SPA ----------
+/* ===============================
+   Static / SPA
+   =============================== */
 const PUBLIC_DIR = path.join(__dirname, "public");
 console.log("[STATIC] PUBLIC_DIR =", PUBLIC_DIR);
 console.log("[STATIC] exists(public)     =", fs.existsSync(PUBLIC_DIR));
