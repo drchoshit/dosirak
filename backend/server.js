@@ -27,28 +27,26 @@ const PORT = Number(process.env.PORT) || 5000;
 // ✅ 프록시(Render 등) 뒤에서 Secure 쿠키 신뢰
 app.set("trust proxy", 1);
 
-// 허용 오리진 목록 (콤마로 구분해 ENV에 지정)
-// 예: CORS_ORIGIN=https://medieats.kr,https://www.medieats.kr
-const ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || "")
+// ===============================
+// CORS 최소 설정
+// 운영: 같은 도메인(/api 상대경로) → CORS 거의 영향 없음
+// 개발: vite dev 서버(5173)에서만 허용 필요
+// ===============================
+const allowList = (process.env.CORS_ORIGIN || "")
   .split(",")
   .map(s => s.trim())
   .filter(Boolean);
 
-// CORS 옵션 함수: 정확한 오리진만 허용 + 쿠키 전달
-const corsOptions = {
-  origin(origin, cb) {
-    // 서버측/헬스체크 등 Origin 없는 요청 허용
-    if (!origin) return cb(null, true);
-    if (ALLOWED_ORIGINS.length === 0) return cb(null, true); // 미설정 시 개방
-    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    return cb(new Error("Not allowed by CORS: " + origin));
-  },
-  credentials: true,
-};
-
-app.use(cors(corsOptions));
-// 프리플라이트 명시 처리(일부 프록시 환경에서 안정성 ↑)
-app.options("*", cors(corsOptions));
+app.use(
+  cors({
+    origin(origin, cb) {
+      if (!origin) return cb(null, true);            // 서버 내부 호출 등
+      if (allowList.includes(origin)) return cb(null, true);
+      return cb(null, false);                        // 불허
+    },
+    credentials: true,                               // ✅ 쿠키 전달 허용
+  })
+);
 
 app.use(express.json({ limit: "2mb" }));
 
@@ -79,11 +77,11 @@ app.post("/api/admin/login", (req, res) => {
   }
   res.cookie(ADMIN_COOKIE_NAME, "1", {
     httpOnly: true,
-    sameSite: COOKIE_SAMESITE,
-    secure: COOKIE_SECURE,
+    sameSite: COOKIE_SAMESITE,     // production이면 "none"
+    secure: COOKIE_SECURE,         // production이면 true
     signed: true,
     path: "/",
-    domain: COOKIE_DOMAIN,
+    domain: COOKIE_DOMAIN || undefined,  // ← undefined면 현재 호스트 도메인 자동 적용
     maxAge: 1000 * 60 * 60 * 24 * 7,
   });
   return res.json({ ok: true });

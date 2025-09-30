@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect } from 'react';
-import { api } from '../lib/api';
+import api from "../lib/api";
 
 const weekdaysKo = ['일','월','화','수','목','금','토'];
 const slots = ['LUNCH','DINNER'];

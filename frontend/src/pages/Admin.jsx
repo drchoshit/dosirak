@@ -1,7 +1,7 @@
-// frontend/src/pages/Admin.jsx
 import React, { useEffect, useMemo, useState } from 'react';
-import { api, studentAPI, adminAPI } from '../lib/api';
+import api, { adminAPI, studentAPI } from "../lib/api"; // ← 여기!
 import { Printer, Settings, CalendarDays, Trash2, LogOut, Save, CheckSquare, Square } from 'lucide-react';
+
 
 const DAY_LABELS = ['일','월','화','수','목','금','토'];
 const DAY_CODES  = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
