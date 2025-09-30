@@ -3,7 +3,7 @@ import React, { useEffect, useState, useCallback } from "react";
 export default function Print() {
   const [date, setDate] = useState("");
 
-  // ?date= 파라미터 자동 반영 (자동-열기 X)
+  // ?date= 파라미터 자동 반영
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const d = params.get("date") || "";
@@ -12,7 +12,7 @@ export default function Print() {
 
   // 개별 셀 HTML
   const cellHtml = (item) => {
-    if (!item) return "&nbsp;"; // 빈칸 유지
+    if (!item) return "&nbsp;";
     const code = item.code ? ` <span class="code">(${item.code})</span>` : "";
     const strongOpen = item.status === "PAID" ? "<strong>" : "";
     const strongClose = item.status === "PAID" ? "</strong>" : "";
@@ -25,8 +25,6 @@ export default function Print() {
 
   /**
    * 인쇄용 새 창 열기
-   * @param {*} payload { date, lunch:[], dinner:[] }
-   * @param {'both'|'lunch'|'dinner'} mode
    */
   const openPrintWindow = useCallback((payload, mode = "both") => {
     const { date, lunch = [], dinner = [] } = payload || {};
@@ -47,7 +45,7 @@ export default function Print() {
     };
 
     const makeRowsOneCol = (arr) => {
-      const len = Math.max(arr.length, 15); // 인쇄 높이 안정화용 여백
+      const len = Math.max(arr.length, 15);
       return Array.from({ length: len })
         .map((_, i) => {
           const it = arr[i];
@@ -56,7 +54,6 @@ export default function Print() {
         .join("");
     };
 
-    // 레이아웃 HTML
     const tablesHtml =
       mode === "both"
         ? `
@@ -121,7 +118,6 @@ export default function Print() {
       display:inline-block; margin-left:8pt; padding:2pt 6pt; font-size:10pt; color:#8a2a2a;
       border:1px solid #e7baba; border-radius:6px; background:#fff2f2;
     }
-    /* 토글: 미결제 숨김 */
     .hide-unpaid .badge-unpaid { display:none !important; }
 
     @media print {
@@ -170,10 +166,14 @@ export default function Print() {
 
       try {
         const res = await fetch(
-          `/api/admin/print?date=${encodeURIComponent(date)}`
+          `/api/admin/print?date=${encodeURIComponent(date)}`,
+          {
+            method: "GET",
+            credentials: "include", // ✅ 세션 쿠키 전송
+          }
         );
         if (!res.ok) throw new Error(await res.text());
-        const data = await res.json(); // { ok, date, lunch:[{name,code,status}], dinner:[...] }
+        const data = await res.json();
         if (!data?.ok) throw new Error(data?.error || "invalid response");
         openPrintWindow(data, mode);
       } catch (e) {
@@ -184,7 +184,6 @@ export default function Print() {
     [date, openPrintWindow]
   );
 
-  // 🔧 자동 열기 비활성화 (기본). 필요하면 /admin/print?date=YYYY-MM-DD&auto=1&mode=lunch|dinner|both 로만 자동 열기
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const auto = params.get("auto");
@@ -208,29 +207,23 @@ export default function Print() {
           className="border rounded-xl px-3 py-2"
         />
 
-        {/* 양쪽(점심+저녁) 인쇄 */}
         <button
           className="btn-primary text-lg px-6 py-3 rounded-xl"
           onClick={() => openPrint("both")}
-          title="인쇄용 창을 열고 인쇄합니다 (양쪽)"
         >
           🖨️ 양쪽 열기/인쇄
         </button>
 
-        {/* 점심만 인쇄 */}
         <button
           className="btn text-lg px-4 py-3 rounded-xl border"
           onClick={() => openPrint("lunch")}
-          title="점심만 인쇄"
         >
           점심 인쇄
         </button>
 
-        {/* 저녁만 인쇄 */}
         <button
           className="btn text-lg px-4 py-3 rounded-xl border"
           onClick={() => openPrint("dinner")}
-          title="저녁만 인쇄"
         >
           저녁 인쇄
         </button>
