@@ -27,7 +27,9 @@ export default function Print() {
    * 인쇄용 새 창 열기
    */
   const openPrintWindow = useCallback((payload, mode = "both") => {
-    const { date, lunch = [], dinner = [] } = payload || {};
+    const { date, lunch = [], dinner = [], counts = {} } = payload || {};
+    const lunchCount = counts.lunch_total ?? lunch.length;
+    const dinnerCount = counts.dinner_total ?? dinner.length;
 
     const makeRowsTwoCols = () => {
       const len = Math.max(lunch.length, dinner.length);
@@ -106,7 +108,8 @@ export default function Print() {
       display:inline-block; padding:12pt 18pt; font-size:13pt; font-weight:700;
       background:#f6f7fb; color:#1f2937; border:1px solid #e5e7eb; border-radius:12px; cursor:pointer;
     }
-    h1{font-size:22pt;margin:0 0 10pt 0}
+    h1{font-size:22pt;margin:0 0 6pt 0}
+    h2.counts{color:#374151; margin:0 0 12pt 0; font-size:13pt}
     .subtitle{color:#6b7280; margin-bottom:4mm; font-size:11pt}
     table{width:100%; border-collapse:collapse; table-layout:fixed;}
     th{font-size:15pt; text-align:center; padding:10pt 8pt; border:2px solid #999; background:#f7f7f9;}
@@ -131,9 +134,8 @@ export default function Print() {
     <button class="btn" onclick="window.print()">🖨️ 인쇄하기</button>
     <button class="btn-ghost" id="toggleUnpaidBtn">미결제 숨기기</button>
   </div>
-  <h1>${date} 도시락 명단${
-      mode !== "both" ? " — " + (mode === "lunch" ? "점심" : "저녁") : ""
-    }</h1>
+  <h1>${date} 도시락 명단${mode !== "both" ? " — " + (mode === "lunch" ? "점심" : "저녁") : ""}</h1>
+  <h2 class="counts">점심: ${lunchCount}명 / 저녁: ${dinnerCount}명</h2>
   ${
     mode === "both"
       ? `<div class="subtitle">양쪽 표가 동시에 인쇄됩니다. 필요한 경우 한쪽만 인쇄하려면 창을 닫고 점심/저녁 단일 버튼을 사용하세요.</div>`
