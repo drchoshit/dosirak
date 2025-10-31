@@ -17,7 +17,7 @@ function StudentHistory() {
     const fetchData = async () => {
       try {
         setLoading(true);
-        const { data } = await api.get(`/api/student/orders/${code}`);
+        const { data } = await api.get(`/student/orders/${code}`);
         if (!data.ok) throw new Error("데이터 로드 실패");
         setStudent(data.student);
         setOrders(data.orders);
