@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "axios": "^1.7.2",
+    "dayjs": "^1.11.19",
     "doshirak-app": "file:..",
     "framer-motion": "^11.2.12",
     "lucide-react": "^0.454.0",
