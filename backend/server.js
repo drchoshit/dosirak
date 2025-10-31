@@ -622,9 +622,15 @@ app.post("/api/orders/commit", async (req, res) => {
     }
 
     const s = await get("SELECT * FROM students WHERE code=?", [code]);
-    if (!s) return res.status(404).json({ ok: false, error: "student not found" });
+    if (!s)
+      return res.status(404).json({ ok: false, error: "student not found" });
 
     const now = dayjs().toISOString();
+
+    // 🔹 기존 신청 내역 전체 삭제 (중복 방지)
+    await run("DELETE FROM orders WHERE student_id=?", [s.id]);
+
+    // 🔹 새 신청 내역 삽입
     for (const it of items) {
       if (!it?.date || !it?.slot) continue;
       await run(
