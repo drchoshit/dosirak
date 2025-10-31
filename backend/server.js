@@ -614,19 +614,65 @@ app.get("/api/policy/active", async (req, res) => {
 /* ===============================
    Orders / Payments
    =============================== */
+// ===============================
+// ✅ /api/orders/commit (안정화 버전)
+// ===============================
 app.post("/api/orders/commit", async (req, res) => {
-  const { code, items } = req.body || {};
-  const s = await get("SELECT * FROM students WHERE code=?", [code]);
-  if (!s) return res.status(404).json({ error: "student not found" });
+  try {
+    const { code, items } = req.body || {};
+    if (!code || !Array.isArray(items) || !items.length) {
+      return res.status(400).json({ ok: false, error: "INVALID_REQUEST" });
+    }
 
-  const now = dayjs().toISOString();
-  for (const it of items || []) {
-    await run(
-      "INSERT INTO orders(student_id,date,slot,price,status,created_at) VALUES(?,?,?,?,?,?)",
-      [s.id, it.date, it.slot, it.price, "SELECTED", now]
-    );
+    const s = await get("SELECT * FROM students WHERE code=?", [code]);
+    if (!s) {
+      return res.status(404).json({ ok: false, error: "student not found" });
+    }
+
+    const now = dayjs().toISOString();
+    let inserted = 0;
+    let skipped = 0;
+
+    for (const it of items) {
+      // ✅ 필수 필드 검증
+      if (!it?.date || !it?.slot) continue;
+
+      // ✅ 이미 신청된 내역 있는지 확인
+      const exists = await get(
+        "SELECT id FROM orders WHERE student_id=? AND date=? AND slot=?",
+        [s.id, it.date, it.slot]
+      );
+
+      if (exists) {
+        skipped++;
+        continue; // 중복 방지
+      }
+
+      // ✅ 새 신청만 INSERT
+      await run(
+        "INSERT INTO orders(student_id,date,slot,price,status,created_at) VALUES(?,?,?,?,?,?)",
+        [s.id, it.date, it.slot, it.price, "SELECTED", now]
+      );
+      inserted++;
+    }
+
+    return res.json({
+      ok: true,
+      inserted,
+      skipped,
+      message:
+        skipped > 0
+          ? `${inserted}건 저장, ${skipped}건은 이미 존재하여 건너뜀`
+          : `${inserted}건 저장 완료`,
+    });
+  } catch (err) {
+    console.error("❌ /api/orders/commit error:", err.message);
+    return res.status(500).json({
+      ok: false,
+      error: "SERVER_ERROR",
+      detail: err.message,
+    });
   }
-  res.json({ ok: true });
 });
 
 app.post("/api/payments/toss/confirm", async (req, res) => {
