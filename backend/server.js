@@ -614,65 +614,19 @@ app.get("/api/policy/active", async (req, res) => {
 /* ===============================
    Orders / Payments
    =============================== */
-// ===============================
-// ✅ /api/orders/commit (안정화 버전)
-// ===============================
 app.post("/api/orders/commit", async (req, res) => {
-  try {
-    const { code, items } = req.body || {};
-    if (!code || !Array.isArray(items) || !items.length) {
-      return res.status(400).json({ ok: false, error: "INVALID_REQUEST" });
-    }
+  const { code, items } = req.body || {};
+  const s = await get("SELECT * FROM students WHERE code=?", [code]);
+  if (!s) return res.status(404).json({ error: "student not found" });
 
-    const s = await get("SELECT * FROM students WHERE code=?", [code]);
-    if (!s) {
-      return res.status(404).json({ ok: false, error: "student not found" });
-    }
-
-    const now = dayjs().toISOString();
-    let inserted = 0;
-    let skipped = 0;
-
-    for (const it of items) {
-      // ✅ 필수 필드 검증
-      if (!it?.date || !it?.slot) continue;
-
-      // ✅ 이미 신청된 내역 있는지 확인
-      const exists = await get(
-        "SELECT id FROM orders WHERE student_id=? AND date=? AND slot=?",
-        [s.id, it.date, it.slot]
-      );
-
-      if (exists) {
-        skipped++;
-        continue; // 중복 방지
-      }
-
-      // ✅ 새 신청만 INSERT
-      await run(
-        "INSERT INTO orders(student_id,date,slot,price,status,created_at) VALUES(?,?,?,?,?,?)",
-        [s.id, it.date, it.slot, it.price, "SELECTED", now]
-      );
-      inserted++;
-    }
-
-    return res.json({
-      ok: true,
-      inserted,
-      skipped,
-      message:
-        skipped > 0
-          ? `${inserted}건 저장, ${skipped}건은 이미 존재하여 건너뜀`
-          : `${inserted}건 저장 완료`,
-    });
-  } catch (err) {
-    console.error("❌ /api/orders/commit error:", err.message);
-    return res.status(500).json({
-      ok: false,
-      error: "SERVER_ERROR",
-      detail: err.message,
-    });
+  const now = dayjs().toISOString();
+  for (const it of items || []) {
+    await run(
+      "INSERT INTO orders(student_id,date,slot,price,status,created_at) VALUES(?,?,?,?,?,?)",
+      [s.id, it.date, it.slot, it.price, "SELECTED", now]
+    );
   }
+  res.json({ ok: true });
 });
 
 app.post("/api/payments/toss/confirm", async (req, res) => {
@@ -784,6 +738,40 @@ app.delete("/api/admin/orders/:id", async (req, res) => {
   }
 });
 
+// ===============================
+// 전체 신청 내역 초기화 (관리자 전용)
+// ===============================
+app.post("/api/admin/resetOrders", async (req, res) => {
+  try {
+    const confirm = req.body?.confirm;
+    if (confirm !== true) {
+      return res.status(400).json({
+        ok: false,
+        error: "CONFIRM_REQUIRED",
+        message: "confirm=true 가 필요합니다.",
+      });
+    }
+
+    // 전체 orders 테이블 삭제
+    const result = await run("DELETE FROM orders");
+    console.log(
+      `[RESET_ORDERS] 모든 신청 내역 초기화됨: ${result?.changes || 0}건 삭제`
+    );
+
+    res.json({
+      ok: true,
+      deleted: Number(result?.changes || 0),
+      message: "모든 학생 신청 내역이 초기화되었습니다.",
+    });
+  } catch (e) {
+    console.error("[RESET_ORDERS_ERROR]", e);
+    res.status(500).json({
+      ok: false,
+      error: String(e?.message || e),
+    });
+  }
+});
+
 // 학생 단위 일괄 취소
 app.post("/api/admin/orders/cancel-student", async (req, res) => {
   try {
@@ -807,6 +795,45 @@ app.post("/api/admin/orders/cancel-student", async (req, res) => {
   } catch (e) {
     console.error("POST /api/admin/orders/cancel-student error:", e);
     res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ===============================
+// 학생 개인 신청 내역 조회
+// ===============================
+app.get("/api/student/orders/:code", async (req, res) => {
+  try {
+    const { code } = req.params;
+    if (!code)
+      return res.status(400).json({ ok: false, error: "code required" });
+
+    const s = await get("SELECT id, name FROM students WHERE code=?", [code]);
+    if (!s)
+      return res.status(404).json({ ok: false, error: "student not found" });
+
+    const rows = await all(
+      `SELECT 
+         o.date, 
+         o.slot, 
+         o.price, 
+         o.status
+       FROM orders o
+       WHERE o.student_id=? 
+       ORDER BY o.date ASC, o.slot ASC`,
+      [s.id]
+    );
+
+    res.json({
+      ok: true,
+      student: s,
+      count: rows.length,
+      orders: rows,
+    });
+  } catch (e) {
+    console.error("GET /api/student/orders/:code error:", e);
+    res
+      .status(500)
+      .json({ ok: false, error: String(e?.message || e) });
   }
 });
 

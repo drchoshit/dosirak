@@ -679,6 +679,28 @@ export default function Admin(){
             await api.post('/admin/policy',payload);
             alert('정책 저장 완료');
           }}>저장</button>
+
+          {/* 🔴 전체 신청 내역 초기화 버튼 */}
+          <button
+            className="btn-danger mt-3 ml-2"
+            onClick={async () => {
+              if (!window.confirm('⚠️ 정말 모든 학생의 신청 내역을 초기화하시겠습니까?\n이 작업은 되돌릴 수 없습니다.')) return;
+              try {
+                // ✅ 경로를 server.js의 실제 API와 일치시킴
+                const { data } = await api.post('/api/admin/reset-orders');
+                if (data?.ok) {
+                  alert(`✅ 모든 신청 내역이 초기화되었습니다.\n삭제된 건수: ${data.deleted ?? 0}건`);
+                } else {
+                  alert('초기화 실패: ' + (data?.error || '알 수 없는 오류'));
+                }
+              } catch (e) {
+                console.error(e);
+                alert('서버 요청 중 오류가 발생했습니다.');
+              }
+            }}
+          >
+            전체 신청 내역 초기화
+          </button>
         </div>
       )}
 
