@@ -1,4 +1,5 @@
 import React, { useMemo, useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';  // ✅ 이 줄을 바로 아래에 추가
 import api from "../lib/api";
 
 const weekdaysKo = ['일','월','화','수','목','금','토'];
@@ -23,6 +24,7 @@ function writeLS(obj){
 }
 
 export default function Student(){
+  const navigate = useNavigate();  // ✅ 이 줄을 가장 위에 추가
   const [code, setCode] = useState('');
   const [name, setName] = useState('');
   const [policy, setPolicy] = useState(null);
@@ -72,7 +74,7 @@ export default function Student(){
       // 정책 자동 로드
       (async ()=>{
         try{
-          const res = await api.get('/policy/active', { params:{ code: saved.lastCode } });
+          const res = await api.get('/api/policy/active', { params:{ code: saved.lastCode } });
           const pol = res.data;
           setPolicy(pol);
           const s = pol.start_date || ymd(new Date());
@@ -110,7 +112,7 @@ export default function Student(){
   async function enter(){
     if(!code || !name) return alert('코드와 이름을 모두 입력하세요');
     try{
-      const res = await api.get('/policy/active', { params:{ code } });
+      const res = await api.get('/api/policy/active', { params:{ code } });
       const pol = res.data;
       setPolicy(pol);
       const s = pol.start_date || ymd(new Date());
@@ -148,7 +150,7 @@ export default function Student(){
     if(items.length===0) return alert('선택이 없습니다.');
     // 문자 확인 가드 제거: smsSent 여부와 모달 호출을 더 이상 체크하지 않습니다.
     try{
-      await api.post('/orders/commit',{ code, items });
+      await api.post('/api/orders/commit',{ code, items });
       alert('도시락 신청 완료(결재 전)');
     }catch{
       alert('저장에 실패했습니다. 잠시 후 다시 시도해 주세요.');
@@ -218,12 +220,19 @@ export default function Student(){
           <button className="btn-primary" onClick={enter}>입장</button>
         </div>
 
-        {policy && (
-          <div className="mt-4 text-slate-600">
-            <b>{policy?.student?.name ?? '학생'}</b> 학생의 페이지
-          </div>
-        )}
-
+        {/* ✅ 내 신청 내역 보기 버튼 — flex 블록 “밖”에 배치 */}
+        <div className="mt-3 text-right">
+          <button
+            className="bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600 transition"
+            onClick={() => {
+              if (!code) return alert("먼저 코드를 입력하세요.");
+              navigate(`/student/history?code=${code}`);
+            }}
+          >
+            내 신청 내역 보기
+          </button>
+        </div>
+        
         <h3 className="mt-5 font-semibold">이번 주 메뉴</h3>
         <LargeMenu/>
       </section>
@@ -368,7 +377,7 @@ function LargeMenu(){
   const [list, setList] = useState([]);
   const [open, setOpen] = useState(false);
   useEffect(()=>{ (async()=>{
-    const r = await fetch('/api/menu-images'); setList(await r.json());
+    const r = await fetch('/api/admin/menu-images'); setList(await r.json());
   })(); },[]);
   if(list.length===0) return <div className="text-slate-500">업로드된 메뉴 이미지가 없습니다.</div>;
   const first = list[0];

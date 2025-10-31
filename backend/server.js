@@ -615,18 +615,29 @@ app.get("/api/policy/active", async (req, res) => {
    Orders / Payments
    =============================== */
 app.post("/api/orders/commit", async (req, res) => {
-  const { code, items } = req.body || {};
-  const s = await get("SELECT * FROM students WHERE code=?", [code]);
-  if (!s) return res.status(404).json({ error: "student not found" });
+  try {
+    const { code, items } = req.body || {};
+    if (!code || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ ok: false, error: "invalid payload" });
+    }
 
-  const now = dayjs().toISOString();
-  for (const it of items || []) {
-    await run(
-      "INSERT INTO orders(student_id,date,slot,price,status,created_at) VALUES(?,?,?,?,?,?)",
-      [s.id, it.date, it.slot, it.price, "SELECTED", now]
-    );
+    const s = await get("SELECT * FROM students WHERE code=?", [code]);
+    if (!s) return res.status(404).json({ ok: false, error: "student not found" });
+
+    const now = dayjs().toISOString();
+    for (const it of items) {
+      if (!it?.date || !it?.slot) continue;
+      await run(
+        "INSERT INTO orders(student_id,date,slot,price,status,created_at) VALUES(?,?,?,?,?,?)",
+        [s.id, it.date, it.slot, it.price || 0, "SELECTED", now]
+      );
+    }
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("[/api/orders/commit] error:", e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
-  res.json({ ok: true });
 });
 
 app.post("/api/payments/toss/confirm", async (req, res) => {
@@ -741,7 +752,7 @@ app.delete("/api/admin/orders/:id", async (req, res) => {
 // ===============================
 // 전체 신청 내역 초기화 (관리자 전용)
 // ===============================
-app.post("/api/admin/resetOrders", async (req, res) => {
+app.post("/api/admin/reset-orders", async (req, res) => {
   try {
     const confirm = req.body?.confirm;
     if (confirm !== true) {
@@ -751,13 +762,8 @@ app.post("/api/admin/resetOrders", async (req, res) => {
         message: "confirm=true 가 필요합니다.",
       });
     }
-
-    // 전체 orders 테이블 삭제
     const result = await run("DELETE FROM orders");
-    console.log(
-      `[RESET_ORDERS] 모든 신청 내역 초기화됨: ${result?.changes || 0}건 삭제`
-    );
-
+    console.log(`[RESET_ORDERS] 모든 신청 내역 초기화됨: ${result?.changes || 0}건 삭제`);
     res.json({
       ok: true,
       deleted: Number(result?.changes || 0),
@@ -765,10 +771,7 @@ app.post("/api/admin/resetOrders", async (req, res) => {
     });
   } catch (e) {
     console.error("[RESET_ORDERS_ERROR]", e);
-    res.status(500).json({
-      ok: false,
-      error: String(e?.message || e),
-    });
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
@@ -1389,6 +1392,7 @@ app.use(express.static(PUBLIC_DIR));
 
 const SPA_ROUTES = [
   "/",
+  "/student/history",  // ✅ 학생 마이페이지 추가
   "/admin",
   "/admin/orders",
   "/admin/print",
@@ -1408,4 +1412,5 @@ app.get(/^\/(?!api\/).*/, (_req, res) => {
 console.log("ENV.PORT =", process.env.PORT);
 console.log("Starting server, PORT =", PORT);
 console.log("Serving static from:", PUBLIC_DIR);
+
 app.listen(PORT, "0.0.0.0", () => console.log("Server started on port", PORT));
