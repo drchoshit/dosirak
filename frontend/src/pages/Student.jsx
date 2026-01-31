@@ -287,7 +287,7 @@ export default function Student(){
         {policy && (
           <>
             <div className="flex items-center justify-between mb-2">
-              <div className="text-sm text-slate-500">선택 후 우측에서 요약 확인</div>
+              <div className="text-sm text-slate-500"></div>
               <div className="flex gap-2">
                 <button className="btn-ghost" onClick={()=>setAllPortion('BASE')}>전체 기본식으로 변경</button>
                 <button className="btn-ghost" onClick={()=>setAllPortion('EXTRA')}>전체 곱빼기로 변경</button>
