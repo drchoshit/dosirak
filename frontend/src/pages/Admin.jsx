@@ -30,6 +30,8 @@ export default function Admin(){
   const [boSlot,setBoSlot]=useState('BOTH');
   const [search,setSearch]=useState('');
   const [saving, setSaving] = useState(false);
+  const [showPrintDialog, setShowPrintDialog] = useState(false);
+  const [printDate, setPrintDate] = useState('');
 
   // --- 신청자 결제 체크(기간 단위, 학생 단일 체크) ---
   const [appStart, setAppStart] = useState('');
@@ -232,6 +234,9 @@ export default function Admin(){
   async function exportStudents(){
     window.location.href = '/api/admin/students/export';
   }
+  function exportAllJson(){
+    window.location.href = '/api/admin/export-json';
+  }
 
   // ---- EXCEL Export ----
   async function exportStudentsXlsx(){
@@ -302,13 +307,14 @@ export default function Admin(){
   }
   const wd = (d)=> DAY_LABELS[new Date(d).getDay()];
 
-  // --- 인쇄: 날짜 받고 새 창으로 열기 (/admin/print?date=YYYY-MM-DD) ---
+  // --- 인쇄: 날짜 선택 후 새 창으로 열기 (/admin/print?date=YYYY-MM-DD) ---
   function openPrintDialog() {
-    const d = prompt('인쇄할 날짜를 YYYY-MM-DD 형식으로 입력하세요.');
-    if (!d) return;
-    const ok = /^\d{4}-\d{2}-\d{2}$/.test(d);
-    if (!ok) { alert('형식이 올바르지 않습니다. 예) 2025-09-01'); return; }
-    window.open(`/admin/print?date=${encodeURIComponent(d)}`, '_blank');
+    setShowPrintDialog(true);
+  }
+  function confirmPrint() {
+    if (!printDate) { alert('날짜를 선택하세요.'); return; }
+    window.open(`/admin/print?date=${encodeURIComponent(printDate)}`, '_blank');
+    setShowPrintDialog(false);
   }
 
   // -------------------
@@ -445,11 +451,33 @@ export default function Admin(){
         <button className="btn-ghost" onClick={openPrintDialog} title="날짜 입력 후 인쇄 화면 열기">
           <Printer size={16} /> 인쇄
         </button>
+        <button className="btn-ghost" onClick={exportAllJson} title="전체 데이터 JSON 저장">
+          <Save size={16} /> 전체 저장(JSON)
+        </button>
         <div className="grow" />
         <button className="btn-ghost" onClick={handleLogout} title="로그아웃">
           <LogOut size={16} /> 로그아웃
         </button>
       </div>
+
+      {showPrintDialog && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl p-6 w-[90vw] max-w-md shadow-xl">
+            <div className="text-lg font-semibold mb-2">인쇄 날짜 선택</div>
+            <div className="text-sm text-slate-600 mb-3">인쇄할 날짜를 선택하세요.</div>
+            <input
+              type="date"
+              className="input w-full"
+              value={printDate}
+              onChange={e=>setPrintDate(e.target.value)}
+            />
+            <div className="flex justify-end gap-2 mt-4">
+              <button className="btn-ghost" onClick={()=>setShowPrintDialog(false)}>취소</button>
+              <button className="btn-primary" onClick={confirmPrint}>확인</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 🟦 신청자 결제 체크 (기간) */}
       <div className="card p-5">
@@ -633,6 +661,9 @@ export default function Admin(){
           <div className="grid sm:grid-cols-2 gap-3 mt-3">
             <label className="text-sm">기본 가격(원)
               <input type="number" value={policy.base_price} onChange={e=>setPolicy({...policy,base_price:+e.target.value})} className="mt-1 w-full border rounded-xl px-3 py-2"/>
+            </label>
+            <label className="text-sm">곱빼기 가격(원)
+              <input type="number" value={policy.extra_price ?? 0} onChange={e=>setPolicy({...policy,extra_price:+e.target.value})} className="mt-1 w-full border rounded-xl px-3 py-2"/>
             </label>
             <div className="text-sm">허용 요일(복수 선택)
               <div className="mt-1 grid grid-cols-7 gap-1">

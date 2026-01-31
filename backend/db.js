@@ -38,6 +38,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS policy(
     id INTEGER PRIMARY KEY CHECK (id=1),
     base_price INTEGER DEFAULT 9000,
+    extra_price INTEGER DEFAULT 12000,
     allowed_weekdays TEXT DEFAULT 'MON,TUE,WED,THU,FRI',
     start_date TEXT,
     end_date TEXT,
@@ -51,6 +52,7 @@ db.exec(`
     student_id INTEGER NOT NULL,
     date TEXT NOT NULL,
     slot TEXT NOT NULL CHECK (slot IN ('LUNCH','DINNER')),
+    portion TEXT NOT NULL DEFAULT 'BASE' CHECK (portion IN ('BASE','EXTRA')),
     price INTEGER NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('SELECTED','PAID')),
     created_at TEXT,

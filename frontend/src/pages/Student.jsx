@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect } from 'react';
+﻿import React, { useMemo, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';  // ✅ 이 줄을 바로 아래에 추가
 import api from "../lib/api";
 
@@ -23,6 +23,18 @@ function writeLS(obj){
   try{ localStorage.setItem(LS_KEY, JSON.stringify(obj||{})); }catch{}
 }
 
+function normalizePortion(val){
+  if (val === 'EXTRA') return 'EXTRA';
+  if (val === 'BASE') return 'BASE';
+  if (val === true) return 'BASE'; // legacy boolean
+  return null;
+}
+
+function slotLabel(slot, portion){
+  const base = slotKo[slot] || slot;
+  return portion === 'EXTRA' ? `${base}(\uACF1\uBE7C\uAE30)` : base;
+}
+
 export default function Student(){
   const navigate = useNavigate();  // ✅ 이 줄을 가장 위에 추가
   const [code, setCode] = useState('');
@@ -38,6 +50,7 @@ export default function Student(){
   const [smsPreview, setSmsPreview] = useState(null);
   const [smsSent, setSmsSent] = useState(true);
   const [showSmsRequire, setShowSmsRequire] = useState(false);
+  const [showCommitConfirm, setShowCommitConfirm] = useState(false);
   const [lsReady, setLsReady] = useState(false); // 초기 복구 완료 플래그
 
   // 허용 요일: 비어 있으면 월~금 기본 허용
@@ -53,7 +66,8 @@ export default function Student(){
     return m;
   },[policy]);
 
-  const price = policy?.base_price || 0;
+  const basePrice = policy?.base_price || 0;
+  const extraPrice = policy?.extra_price ?? basePrice;
 
   // 기간 → 날짜 배열
   useEffect(()=>{
@@ -126,24 +140,45 @@ export default function Student(){
     }
   }
 
-  function toggle(date, slot){
-    const key = `${date}-${slot}`;
-    setSelected(s => ({ ...s, [key]: !s[key] }));
-  }
   function removeItem(it){
     const key = `${it.date}-${it.slot}`;
     setSelected(s => ({ ...s, [key]: false }));
   }
+  function setPortion(date, slot, portion){
+    const key = `${date}-${slot}`;
+    setSelected(s => {
+      const next = { ...s };
+      const current = normalizePortion(next[key]);
+      if (!portion || current === portion) {
+        delete next[key];
+        return next;
+      }
+      next[key] = portion;
+      return next;
+    });
+  }
+  function setAllPortion(portion){
+    const keys = Object.keys(selected).filter(k => normalizePortion(selected[k]));
+    if (!keys.length) { alert('\uC120\uD0DD\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.'); return; }
+    setSelected(s => {
+      const next = { ...s };
+      keys.forEach(k => { next[k] = portion; });
+      return next;
+    });
+  }
 
   const items = Object.entries(selected)
-    .filter(([k,v])=>v)
-    .map(([k])=>{
+    .map(([k,v])=>{
+      const portion = normalizePortion(v);
+      if (!portion) return null;
       const lastDash = k.lastIndexOf('-');
       const d = k.slice(0, lastDash);
       const slot = k.slice(lastDash + 1);
-      return { date: d, slot, price };
-    });
-  const total = items.reduce((a,b)=>a+b.price,0);
+      const price = portion === 'EXTRA' ? extraPrice : basePrice;
+      return { date: d, slot, portion, price };
+    })
+    .filter(Boolean);
+  const total = items.reduce((a,b)=>a+(Number(b.price)||0),0);
 
   async function commit(){
     if(!code) return alert('코드를 먼저 입력하세요.');
@@ -155,6 +190,11 @@ export default function Student(){
     }catch{
       alert('저장에 실패했습니다. 잠시 후 다시 시도해 주세요.');
     }
+  }
+
+  function openCommitConfirm(){
+    if(items.length===0) { alert('선택이 없습니다.'); return; }
+    setShowCommitConfirm(true);
   }
 
   // 문자 전송(미리보기 포함)
@@ -169,7 +209,7 @@ export default function Student(){
     const totalCount = items.length;
     const lines = orderedDates.map(d => {
       const wd = weekdaysKo[new Date(d).getDay()];
-      const labels = grouped[d].map(x=>slotKo[x.slot]).sort().join(', ');
+      const labels = grouped[d].map(x=>slotLabel(x.slot, x.portion)).sort().join(', ');
       return `${fmtMD(d)}(${wd}) ${labels}`;
     }).join('\n');
 
@@ -211,10 +251,10 @@ export default function Student(){
 
   return (
     <div className="grid grid-student lg:grid-cols-2 gap-6">
-      {/* Left */}
-      <section className="card p-5">
+      {/* Entry */}
+      <section className="card p-5 lg:col-span-2">
         <h2 className="text-xl font-bold mb-3">학생 입장</h2>
-        <div className="flex gap-2 flex-col sm:flex-row">
+        <div className="flex gap-2 flex-col sm:flex-row sm:items-center">
           <input className="flex-1 border rounded-xl px-3 py-2" placeholder="코드 입력 (예: dfv201)" value={code} onChange={e=>setCode(e.target.value)}/>
           <input className="flex-1 border rounded-xl px-3 py-2" placeholder="이름 입력" value={name} onChange={e=>setName(e.target.value)}/>
           <button className="btn-primary" onClick={enter}>입장</button>
@@ -232,20 +272,27 @@ export default function Student(){
             내 신청 내역 보기
           </button>
         </div>
+      </section>
 
-        <h3 className="mt-5 font-semibold">이번 주 메뉴</h3>
+      {/* Menu */}
+      <section className="card p-5 lg:col-span-2">
+        <h2 className="text-xl font-bold mb-3">이번 주 메뉴</h2>
         <LargeMenu/>
       </section>
 
       {/* Middle: week calendar */}
-      <section className="card p-5">
+      <section className="card p-5 lg:col-span-2">
         <h2 className="text-xl font-bold mb-3">기간 신청</h2>
         {!policy && <div className="text-slate-500">코드와 이름으로 입장하면 신청 캘린더가 열립니다.</div>}
         {policy && (
           <>
             <div className="flex items-center justify-between mb-2">
               <div className="text-sm text-slate-500">선택 후 우측에서 요약 확인</div>
-              <button className="btn-ghost" onClick={resetSelections}>선택 리셋</button>
+              <div className="flex gap-2">
+                <button className="btn-ghost" onClick={()=>setAllPortion('BASE')}>전체 기본식으로 변경</button>
+                <button className="btn-ghost" onClick={()=>setAllPortion('EXTRA')}>전체 곱빼기로 변경</button>
+                <button className="btn-ghost" onClick={resetSelections}>선택 리셋</button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -267,24 +314,40 @@ export default function Student(){
                       <div className="text-sm text-slate-500">{weekdaysKo[wd]}</div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-2 mt-1">
+                    <div className="grid grid-cols-2 gap-3 mt-1">
                       {slots.map(slot=>{
                         const key = `${d}-${slot}`;
-                        const sel = !!items.find(x=>x.date===d && x.slot===slot);
                         const disabled = !!nosvc.get(key);
+                        const selectedItem = items.find(x=>x.date===d && x.slot===slot);
+                        const portion = selectedItem?.portion || null;
                         return (
-                          <button
-                            key={slot}
-                            onClick={()=>!disabled && toggle(d,slot)}
-                            className={`h-10 rounded-xl border text-sm w-full text-center transition
-                              ${sel ? 'bg-primary text-white border-primary shadow' : 'bg-white hover:bg-slate-50'}
-                              ${disabled ? 'opacity-40 cursor-not-allowed' : ''}
-                            `}
-                            disabled={disabled}
-                            title={disabled ? '신청 불가' : slotKo[slot]}
-                          >
-                            {slotKo[slot]}
-                          </button>
+                          <div key={slot} className={`rounded-xl border p-2 ${disabled ? 'opacity-40' : ''}`}>
+                            <div className="text-xs text-slate-500 mb-1">{slotKo[slot]}</div>
+                            <div className="grid grid-cols-2 gap-1">
+                              <button
+                                onClick={()=>!disabled && setPortion(d,slot,'BASE')}
+                                className={`h-9 rounded-lg border text-xs w-full text-center transition
+                                  ${portion === 'BASE' ? 'bg-primary text-white border-primary shadow' : 'bg-white hover:bg-slate-50'}
+                                  ${disabled ? 'cursor-not-allowed' : ''}
+                                `}
+                                disabled={disabled}
+                                title={disabled ? '신청 불가' : `${slotKo[slot]} - 기본`}
+                              >
+                                기본
+                              </button>
+                              <button
+                                onClick={()=>!disabled && setPortion(d,slot,'EXTRA')}
+                                className={`h-9 rounded-lg border text-xs w-full text-center transition
+                                  ${portion === 'EXTRA' ? 'bg-primary text-white border-primary shadow' : 'bg-white hover:bg-slate-50'}
+                                  ${disabled ? 'cursor-not-allowed' : ''}
+                                `}
+                                disabled={disabled}
+                                title={disabled ? '신청 불가' : `${slotKo[slot]} - 곱빼기`}
+                              >
+                                곱빼기
+                              </button>
+                            </div>
+                          </div>
                         );
                       })}
                     </div>
@@ -306,7 +369,7 @@ export default function Student(){
           }, {});
           const rows = Object.entries(groups).map(([date, arr]) => {
             const wd = weekdaysKo[new Date(date).getDay()];
-            const labels = arr.map(x => slotKo[x.slot]).sort();
+            const labels = arr.map(x => slotLabel(x.slot, x.portion)).sort();
             const perDayTotal = arr.reduce((s,x)=> s + (x.price||0), 0);
             return { date, wd, labels, perDayTotal, arr };
           }).sort((a,b)=> a.date.localeCompare(b.date));
@@ -328,7 +391,7 @@ export default function Student(){
               </div>
 
               <div className="mt-4 flex flex-col gap-2">
-                <button className="btn-primary" onClick={commit}>*필수클릭* 저장 및 제출하기</button>
+                <button className="btn-primary" onClick={openCommitConfirm}>*필수클릭* 저장 및 제출하기</button>
 
                 <div className="flex gap-2">
                   <input
@@ -353,6 +416,22 @@ export default function Student(){
           )
         })()}
       </aside>
+
+      {/* Commit confirm modal */}
+      {showCommitConfirm && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl p-6 w-[90vw] max-w-md shadow-xl">
+            <div className="text-lg font-semibold mb-2">확인</div>
+            <div className="text-sm text-slate-600 mb-4">
+              하단 결제 요약의 신청 일자와 금액을 확인하셨습니까?
+            </div>
+            <div className="flex justify-end gap-2">
+              <button className="btn-ghost" onClick={()=>setShowCommitConfirm(false)}>취소</button>
+              <button className="btn-primary" onClick={()=>{ setShowCommitConfirm(false); commit(); }}>확인</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Global modal: 문자 요구 */}
       {showSmsRequire && (

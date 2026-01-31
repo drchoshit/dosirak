@@ -55,7 +55,7 @@ app.use(express.json({ limit: "2mb" }));
    =============================== */
 
 const ADMIN_USER = process.env.ADMIN_USER || "medicalsoap";
-const ADMIN_PASS = process.env.ADMIN_PASS || "ghfkdskql2827";
+const ADMIN_PASS = process.env.ADMIN_PASS || "WkddkdmlRna1611";
 const ADMIN_SECRET =
   process.env.ADMIN_SECRET ||
   "please-change-this-admin-cookie-secret-very-long";
@@ -136,6 +136,20 @@ const uploadExcel = multer({ dest: TMP_DIR });
     if (!hasCol) {
       await run("ALTER TABLE policy ADD COLUMN sms_extra_text TEXT");
       console.log("DB migrated: sms_extra_text column added to policy table");
+    }
+    const hasExtra = cols.some((c) => c.name === "extra_price");
+    if (!hasExtra) {
+      await run("ALTER TABLE policy ADD COLUMN extra_price INTEGER");
+      await run("UPDATE policy SET extra_price=12000 WHERE extra_price IS NULL");
+      console.log("DB migrated: extra_price column added to policy table");
+    }
+
+    const orderCols = await all("PRAGMA table_info(orders)");
+    const hasPortion = orderCols.some((c) => c.name === "portion");
+    if (!hasPortion) {
+      await run("ALTER TABLE orders ADD COLUMN portion TEXT");
+      await run("UPDATE orders SET portion='BASE' WHERE portion IS NULL OR portion=''");
+      console.log("DB migrated: portion column added to orders table");
     }
   } catch (e) {
     console.error("DB migration check failed:", e);
@@ -455,6 +469,67 @@ app.get("/api/admin/students/export", async (_req, res) => {
   res.send(header + body);
 });
 
+// JSON export (all data)
+app.get("/api/admin/export-json", async (_req, res) => {
+  try {
+    const policy = await get("SELECT * FROM policy WHERE id=1");
+    const students = await all("SELECT * FROM students ORDER BY name");
+    const orders = await all(
+      "SELECT * FROM orders ORDER BY date ASC, slot ASC, student_id ASC"
+    );
+    const blackout = await all("SELECT * FROM blackout ORDER BY date, slot");
+    const menu_images = await all(
+      "SELECT * FROM menu_images ORDER BY uploaded_at DESC"
+    );
+
+    const summaryMap = new Map();
+    for (const s of students) {
+      summaryMap.set(s.id, {
+        student_id: s.id,
+        name: s.name,
+        code: s.code,
+        count: 0,
+        total_amount: 0,
+      });
+    }
+    for (const o of orders) {
+      if (!summaryMap.has(o.student_id)) {
+        summaryMap.set(o.student_id, {
+          student_id: o.student_id,
+          name: "",
+          code: "",
+          count: 0,
+          total_amount: 0,
+        });
+      }
+      const entry = summaryMap.get(o.student_id);
+      entry.count += 1;
+      entry.total_amount += Number(o.price || 0);
+    }
+
+    const payload = {
+      exported_at: dayjs().toISOString(),
+      policy,
+      students,
+      orders,
+      blackout,
+      menu_images,
+      summary_by_student: Array.from(summaryMap.values()),
+    };
+
+    const stamp = dayjs().format("YYYY-MM-DD");
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="doshirak_export_${stamp}.json"`
+    );
+    res.send(JSON.stringify(payload, null, 2));
+  } catch (e) {
+    console.error("export-json error:", e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 // 전체 저장(일괄 upsert)
 app.post("/api/admin/students/bulk-upsert", async (req, res) => {
   const list = Array.isArray(req.body?.students) ? req.body.students : [];
@@ -507,14 +582,22 @@ app.get("/api/admin/policy", async (_req, res) =>
 app.post("/api/admin/policy", async (req, res) => {
   const {
     base_price,
+    extra_price,
     allowed_weekdays,
     start_date,
     end_date,
     sms_extra_text,
   } = req.body || {};
   await run(
-    "UPDATE policy SET base_price=?, allowed_weekdays=?, start_date=?, end_date=?, sms_extra_text=? WHERE id=1",
-    [base_price, allowed_weekdays, start_date, end_date, sms_extra_text ?? null]
+    "UPDATE policy SET base_price=?, extra_price=?, allowed_weekdays=?, start_date=?, end_date=?, sms_extra_text=? WHERE id=1",
+    [
+      base_price,
+      extra_price,
+      allowed_weekdays,
+      start_date,
+      end_date,
+      sms_extra_text ?? null,
+    ]
   );
   res.json({ ok: true });
 });
@@ -600,8 +683,12 @@ app.get("/api/policy/active", async (req, res) => {
     : g.end_date || s.end_date || null;
 
   const bl = await all("SELECT * FROM blackout");
+  const basePrice = s.price_override ?? g.base_price ?? 0;
+  const extraPrice = g.extra_price ?? basePrice;
+
   res.json({
-    base_price: s.price_override ?? g.base_price,
+    base_price: basePrice,
+    extra_price: extraPrice,
     allowed_weekdays: Array.from(allowed),
     start_date,
     end_date,
@@ -625,6 +712,10 @@ app.post("/api/orders/commit", async (req, res) => {
     if (!s)
       return res.status(404).json({ ok: false, error: "student not found" });
 
+    const g = await get("SELECT base_price, extra_price FROM policy WHERE id=1");
+    const basePrice = s.price_override ?? g?.base_price ?? 0;
+    const extraPrice = g?.extra_price ?? basePrice;
+
     const now = dayjs().toISOString();
 
     // 🔹 기존 신청 내역 전체 삭제 (중복 방지)
@@ -633,9 +724,14 @@ app.post("/api/orders/commit", async (req, res) => {
     // 🔹 새 신청 내역 삽입
     for (const it of items) {
       if (!it?.date || !it?.slot) continue;
+      const slot = String(it.slot || "").toUpperCase();
+      if (slot !== "LUNCH" && slot !== "DINNER") continue;
+      const portionRaw = String(it.portion || "").toUpperCase();
+      const portion = portionRaw === "EXTRA" ? "EXTRA" : "BASE";
+      const price = portion === "EXTRA" ? extraPrice : basePrice;
       await run(
-        "INSERT INTO orders(student_id,date,slot,price,status,created_at) VALUES(?,?,?,?,?,?)",
-        [s.id, it.date, it.slot, it.price || 0, "SELECTED", now]
+        "INSERT INTO orders(student_id,date,slot,portion,price,status,created_at) VALUES(?,?,?,?,?,?,?)",
+        [s.id, it.date, slot, portion, price, "SELECTED", now]
       );
     }
 
