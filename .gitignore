@@ -1,0 +1,9 @@
+node_modules
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+frontend/.env*
+backend/.env*
+frontend/dist/
+backend/uploads/
