@@ -6,7 +6,8 @@ const DAY_LABELS = ['일', '월', '화', '수', '목', '금', '토'];
 const DAY_CODES = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
 
 export default function Admin() {
-  const showStudentAddDeleteButtons = false;
+  const showStudentAddButtons = false;
+  const showStudentDeleteButtons = true;
   // --- Auth state ---
   const [isAuthed, setIsAuthed] = useState(null);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
@@ -594,7 +595,7 @@ export default function Admin() {
             <input className="input" placeholder="코드" value={newStu.code} onChange={e => setNewStu(s => ({ ...s, code: e.target.value }))} />
             <input className="input" placeholder="학생 연락처" value={newStu.phone} onChange={e => setNewStu(s => ({ ...s, phone: e.target.value }))} />
             <input className="input" placeholder="부모 연락처" value={newStu.parent_phone} onChange={e => setNewStu(s => ({ ...s, parent_phone: e.target.value }))} />
-            {showStudentAddDeleteButtons ? (
+            {showStudentAddButtons ? (
               <button className="btn" onClick={addStudent}>학생 추가</button>
             ) : null}
           </div>
@@ -635,7 +636,7 @@ export default function Admin() {
                     <td className="p-2 border">
                       <div className="flex gap-2">
                         <button className="btn-ghost" onClick={() => updateStudent(st)}>저장</button>
-                        {showStudentAddDeleteButtons ? (
+                        {showStudentDeleteButtons ? (
                           <button className="btn-ghost" onClick={() => deleteStudentRow(st.id)}>삭제</button>
                         ) : null}
                       </div>
