@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "nodemon server.js",
     "start": "node server.js",
-    "seed": "node seed.js"
+    "seed": "node seed.js",
+    "restore:orders": "node scripts/restore-orders-from-sqlite.js"
   },
   "dependencies": {
     "axios": "^1.7.2",

@@ -704,7 +704,7 @@ app.get("/api/policy/active", async (req, res) => {
 app.post("/api/orders/commit", async (req, res) => {
   try {
     const { code, items } = req.body || {};
-    if (!code || !Array.isArray(items) || items.length === 0) {
+    if (!code || !Array.isArray(items)) {
       return res.status(400).json({ ok: false, error: "invalid payload" });
     }
 
@@ -712,36 +712,106 @@ app.post("/api/orders/commit", async (req, res) => {
     if (!s)
       return res.status(404).json({ ok: false, error: "student not found" });
 
-    const g = await get("SELECT base_price, extra_price FROM policy WHERE id=1");
+    const g = await get(
+      "SELECT base_price, extra_price, start_date, end_date FROM policy WHERE id=1"
+    );
     const basePrice = s.price_override ?? g?.base_price ?? 0;
     const extraPrice = g?.extra_price ?? basePrice;
 
     const now = dayjs().toISOString();
 
-    // 🔹 기존 신청 내역 전체 삭제 (중복 방지)
-    await run("DELETE FROM orders WHERE student_id=?", [s.id]);
+    const toDateStrict = (value) => {
+      const text = String(value || "").trim();
+      if (!text) return null;
+      const d = dayjs(text, "YYYY-MM-DD", true);
+      return d.isValid() ? d : null;
+    };
+    const gStart = toDateStrict(g?.start_date);
+    const gEnd = toDateStrict(g?.end_date);
+    const sStart = toDateStrict(s?.start_date);
+    const sEnd = toDateStrict(s?.end_date);
+    const effStart = [gStart, sStart]
+      .filter(Boolean)
+      .reduce((a, b) => (a && b ? (a.isAfter(b) ? a : b) : a || b), null);
+    const effEnd = [gEnd, sEnd]
+      .filter(Boolean)
+      .reduce((a, b) => (a && b ? (a.isBefore(b) ? a : b) : a || b), null);
+    const windowStart = effStart ? effStart.format("YYYY-MM-DD") : null;
+    const windowEnd = effEnd ? effEnd.format("YYYY-MM-DD") : null;
 
-    // 🔹 새 신청 내역 삽입
+    const normalizedItems = [];
     for (const it of items) {
       if (!it?.date || !it?.slot) continue;
+      const date = String(it.date || "").trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
       const slot = String(it.slot || "").toUpperCase();
       if (slot !== "LUNCH" && slot !== "DINNER") continue;
       const portionRaw = String(it.portion || "").toUpperCase();
       const portion = portionRaw === "EXTRA" ? "EXTRA" : "BASE";
       const price = portion === "EXTRA" ? extraPrice : basePrice;
-      await run(
-        "INSERT INTO orders(student_id,date,slot,portion,price,status,created_at) VALUES(?,?,?,?,?,?,?)",
-        [s.id, it.date, slot, portion, price, "SELECTED", now]
-      );
+      normalizedItems.push({ date, slot, portion, price });
     }
 
-    res.json({ ok: true });
+    let deletedSelected = 0;
+    let upserted = 0;
+
+    await run("BEGIN IMMEDIATE");
+    try {
+      const deleteWhere = ["student_id=?", "status='SELECTED'"];
+      const deleteParams = [s.id];
+      if (windowStart && windowEnd) {
+        deleteWhere.push("date BETWEEN ? AND ?");
+        deleteParams.push(windowStart, windowEnd);
+      } else if (windowStart) {
+        deleteWhere.push("date >= ?");
+        deleteParams.push(windowStart);
+      } else if (windowEnd) {
+        deleteWhere.push("date <= ?");
+        deleteParams.push(windowEnd);
+      } else if (normalizedItems.length) {
+        const dates = Array.from(new Set(normalizedItems.map((x) => x.date)));
+        deleteWhere.push(`date IN (${dates.map(() => "?").join(",")})`);
+        deleteParams.push(...dates);
+      }
+
+      if (deleteWhere.length > 2 || normalizedItems.length) {
+        const del = await run(
+          `DELETE FROM orders WHERE ${deleteWhere.join(" AND ")}`,
+          deleteParams
+        );
+        deletedSelected = Number(del?.changes || 0);
+      }
+
+      for (const it of normalizedItems) {
+        const result = await run(
+          `
+          INSERT INTO orders(student_id,date,slot,portion,price,status,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,?)
+          ON CONFLICT(student_id,date,slot) DO UPDATE SET
+            portion=excluded.portion,
+            price=excluded.price,
+            status=CASE WHEN orders.status='PAID' THEN 'PAID' ELSE excluded.status END,
+            updated_at=excluded.updated_at
+          `,
+          [s.id, it.date, it.slot, it.portion, it.price, "SELECTED", now, now]
+        );
+        upserted += Number(result?.changes || 0);
+      }
+
+      await run("COMMIT");
+    } catch (txErr) {
+      try {
+        await run("ROLLBACK");
+      } catch {}
+      throw txErr;
+    }
+
+    res.json({ ok: true, deleted_selected: deletedSelected, upserted });
   } catch (e) {
     console.error("[/api/orders/commit] error:", e);
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
-
 app.post("/api/payments/toss/confirm", async (req, res) => {
   const { paymentKey, orderId, amount, code, dateslots } = req.body || {};
   if (!paymentKey || !amount || !orderId)
