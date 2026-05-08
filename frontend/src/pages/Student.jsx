@@ -10,6 +10,7 @@ const LS_KEY = 'doshirak.session.v1';
 
 function ymd(dt){ const p=n=>String(n).padStart(2,'0'); return `${dt.getFullYear()}-${p(dt.getMonth()+1)}-${p(dt.getDate())}`; }
 function fmtMD(dateStr){ const d=new Date(dateStr); if (isNaN(d)) return dateStr; return `${d.getMonth()+1}/${d.getDate()}`; }
+function fmtDateTime(value){ return value ? String(value).replace('T', ' ') : '미설정'; }
 function genDates(startStr, endStr){
   const out=[]; const s=new Date(startStr), e=new Date(endStr);
   if(isNaN(s) || isNaN(e)) return out;
@@ -51,6 +52,7 @@ export default function Student(){
   const [smsSent, setSmsSent] = useState(true);
   const [showSmsRequire, setShowSmsRequire] = useState(false);
   const [showCommitConfirm, setShowCommitConfirm] = useState(false);
+  const [showApplicationClosed, setShowApplicationClosed] = useState(false);
   const [lsReady, setLsReady] = useState(false); // 초기 복구 완료 플래그
 
   // 허용 요일: 비어 있으면 월~금 기본 허용
@@ -68,6 +70,7 @@ export default function Student(){
 
   const basePrice = policy?.base_price || 0;
   const extraPrice = policy?.extra_price ?? basePrice;
+  const applicationIsOpen = policy?.application_is_open !== false;
 
   // 기간 → 날짜 배열
   useEffect(()=>{
@@ -91,6 +94,7 @@ export default function Student(){
           const res = await api.get('/policy/active', { params:{ code: saved.lastCode } });
           const pol = res.data;
           setPolicy(pol);
+          setShowApplicationClosed(pol.application_is_open === false);
           const s = pol.start_date || ymd(new Date());
           const e = pol.end_date   || s;
           setRangeStart(s); setRangeEnd(e);
@@ -129,6 +133,7 @@ export default function Student(){
       const res = await api.get('/policy/active', { params:{ code } });
       const pol = res.data;
       setPolicy(pol);
+      setShowApplicationClosed(pol.application_is_open === false);
       const s = pol.start_date || ymd(new Date());
       const e = pol.end_date   || s;
       setRangeStart(s); setRangeEnd(e);
@@ -145,7 +150,15 @@ export default function Student(){
     setSelected(s => ({ ...s, [key]: false }));
   }
   function setPortion(date, slot, portion){
+    if(!applicationIsOpen){
+      setShowApplicationClosed(true);
+      return;
+    }
     const key = `${date}-${slot}`;
+    if(carryoverMap.has(key)){
+      alert('이월된 식수는 이미 결제된 0원 식수입니다.');
+      return;
+    }
     setSelected(s => {
       const next = { ...s };
       const current = normalizePortion(next[key]);
@@ -158,6 +171,10 @@ export default function Student(){
     });
   }
   function setAllPortion(portion){
+    if(!applicationIsOpen){
+      setShowApplicationClosed(true);
+      return;
+    }
     const keys = Object.keys(selected).filter(k => normalizePortion(selected[k]));
     if (!keys.length) { alert('\uC120\uD0DD\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.'); return; }
     setSelected(s => {
@@ -167,6 +184,27 @@ export default function Student(){
     });
   }
 
+  const carryoverItems = useMemo(() => {
+    const visibleDates = new Set(weekDates);
+    return (policy?.carryovers || [])
+      .filter(c => !visibleDates.size || visibleDates.has(c.to_date))
+      .map(c => ({
+        date: c.to_date,
+        slot: c.to_slot,
+        portion: c.portion || 'BASE',
+        price: 0,
+        source: 'CARRYOVER',
+        from_date: c.from_date,
+        from_slot: c.from_slot,
+      }));
+  }, [policy, weekDates]);
+
+  const carryoverMap = useMemo(() => {
+    const m = new Map();
+    carryoverItems.forEach(it => m.set(`${it.date}-${it.slot}`, it));
+    return m;
+  }, [carryoverItems]);
+
   const items = Object.entries(selected)
     .map(([k,v])=>{
       const portion = normalizePortion(v);
@@ -174,26 +212,44 @@ export default function Student(){
       const lastDash = k.lastIndexOf('-');
       const d = k.slice(0, lastDash);
       const slot = k.slice(lastDash + 1);
+      if (carryoverMap.has(`${d}-${slot}`)) return null;
       const price = portion === 'EXTRA' ? extraPrice : basePrice;
       return { date: d, slot, portion, price };
     })
     .filter(Boolean);
   const total = items.reduce((a,b)=>a+(Number(b.price)||0),0);
+  const summaryItems = [...items, ...carryoverItems].sort((a,b)=>{
+    if (a.date !== b.date) return a.date.localeCompare(b.date);
+    return String(a.slot).localeCompare(String(b.slot));
+  });
 
   async function commit(){
     if(!code) return alert('코드를 먼저 입력하세요.');
+    if(!applicationIsOpen){ setShowApplicationClosed(true); return; }
     if(items.length===0) return alert('선택이 없습니다.');
     // 문자 확인 가드 제거: smsSent 여부와 모달 호출을 더 이상 체크하지 않습니다.
     try{
       await api.post('/orders/commit',{ code, items });
       alert('도시락 신청 완료(결재 전)');
       resetSelections({ silent: true });
-    }catch{
+    }catch(e){
+      if(e?.response?.status === 403 && e?.response?.data?.error === 'APPLICATION_CLOSED'){
+        setPolicy(p => p ? {
+          ...p,
+          application_start_at: e.response.data.application_start_at,
+          application_end_at: e.response.data.application_end_at,
+          application_now: e.response.data.application_now,
+          application_is_open: false,
+        } : p);
+        setShowApplicationClosed(true);
+        return;
+      }
       alert('저장에 실패했습니다. 잠시 후 다시 시도해 주세요.');
     }
   }
 
   function openCommitConfirm(){
+    if(!applicationIsOpen){ setShowApplicationClosed(true); return; }
     if(items.length===0) { alert('선택이 없습니다.'); return; }
     setShowCommitConfirm(true);
   }
@@ -287,6 +343,11 @@ export default function Student(){
         {!policy && <div className="text-slate-500">코드와 이름으로 입장하면 신청 캘린더가 열립니다.</div>}
         {policy && (
           <>
+            {!applicationIsOpen && (
+              <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                현재 온라인 신청 기간이 아닙니다. 신청 가능 시간은 {fmtDateTime(policy.application_start_at)} ~ {fmtDateTime(policy.application_end_at)} 입니다.
+              </div>
+            )}
             <div className="flex items-center justify-between mb-2">
               <div className="text-sm text-slate-500"></div>
               <div className="flex gap-2">
@@ -318,12 +379,21 @@ export default function Student(){
                     <div className="grid grid-cols-2 gap-3 mt-1">
                       {slots.map(slot=>{
                         const key = `${d}-${slot}`;
-                        const disabled = !!nosvc.get(key);
+                        const carryoverItem = carryoverMap.get(key);
+                        const disabled = !!nosvc.get(key) || !!carryoverItem || !applicationIsOpen;
                         const selectedItem = items.find(x=>x.date===d && x.slot===slot);
                         const portion = selectedItem?.portion || null;
+                        const disabledTitle = carryoverItem
+                          ? `이월 식수: ${fmtMD(carryoverItem.from_date)} ${slotKo[carryoverItem.from_slot] || carryoverItem.from_slot}에서 이월`
+                          : (!applicationIsOpen ? '현재 온라인 신청 기간이 아닙니다.' : '신청 불가');
                         return (
-                          <div key={slot} className={`rounded-xl border p-2 ${disabled ? 'opacity-40' : ''}`}>
+                          <div key={slot} className={`rounded-xl border p-2 ${disabled && !carryoverItem ? 'opacity-40' : ''} ${carryoverItem ? 'bg-emerald-50 border-emerald-200' : ''}`}>
                             <div className="text-xs text-slate-500 mb-1">{slotKo[slot]}</div>
+                            {carryoverItem && (
+                              <div className="mb-1 text-[11px] font-semibold text-emerald-700">
+                                이월됨 · 결제완료 · 0원
+                              </div>
+                            )}
                             <div className="grid grid-cols-2 gap-1">
                               <button
                                 onClick={()=>!disabled && setPortion(d,slot,'BASE')}
@@ -332,7 +402,7 @@ export default function Student(){
                                   ${disabled ? 'cursor-not-allowed' : ''}
                                 `}
                                 disabled={disabled}
-                                title={disabled ? '신청 불가' : `${slotKo[slot]} - 기본`}
+                                title={disabled ? disabledTitle : `${slotKo[slot]} - 기본`}
                               >
                                 기본
                               </button>
@@ -343,7 +413,7 @@ export default function Student(){
                                   ${disabled ? 'cursor-not-allowed' : ''}
                                 `}
                                 disabled={disabled}
-                                title={disabled ? '신청 불가' : `${slotKo[slot]} - 곱빼기`}
+                                title={disabled ? disabledTitle : `${slotKo[slot]} - 곱빼기`}
                               >
                                 곱빼기
                               </button>
@@ -364,20 +434,20 @@ export default function Student(){
       <aside className="card p-5 lg:col-span-2 h-max">
         <h2 className="text-xl font-bold mb-3">결제 요약</h2>
         {(() => {
-          const groups = items.reduce((acc, it) => {
+          const groups = summaryItems.reduce((acc, it) => {
             (acc[it.date] = acc[it.date] || []).push(it);
             return acc;
           }, {});
           const rows = Object.entries(groups).map(([date, arr]) => {
             const wd = weekdaysKo[new Date(date).getDay()];
-            const labels = arr.map(x => slotLabel(x.slot, x.portion)).sort();
+            const labels = arr.map(x => x.source === 'CARRYOVER' ? `${slotLabel(x.slot, x.portion)}(이월/0원)` : slotLabel(x.slot, x.portion)).sort();
             const perDayTotal = arr.reduce((s,x)=> s + (x.price||0), 0);
             return { date, wd, labels, perDayTotal, arr };
           }).sort((a,b)=> a.date.localeCompare(b.date));
           return (
             <>
               <div className="space-y-2 max-h-64 overflow-auto pr-1">
-                {items.length===0 && <div className="text-slate-500">선택 내역이 없습니다.</div>}
+                {summaryItems.length===0 && <div className="text-slate-500">선택 내역이 없습니다.</div>}
                 {rows.map((r) => (
                   <div key={r.date} className="flex items-center justify-between text-sm">
                     <div>{r.date} {r.wd} {r.labels.join(', ')}</div>
@@ -429,6 +499,26 @@ export default function Student(){
             <div className="flex justify-end gap-2">
               <button className="btn-ghost" onClick={()=>setShowCommitConfirm(false)}>취소</button>
               <button className="btn-primary" onClick={()=>{ setShowCommitConfirm(false); commit(); }}>확인</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showApplicationClosed && policy?.application_is_open === false && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 px-4">
+          <div className="bg-white rounded-2xl p-7 w-[92vw] max-w-lg shadow-xl">
+            <div className="text-2xl font-bold mb-3">현재 도시락 신청 기간이 아닙니다</div>
+            <div className="text-slate-700 leading-6">
+              온라인 신청은 아래 기간에만 가능합니다. 기간 외 추가 신청은 전화로 문의해 주세요.
+            </div>
+            <div className="mt-5 rounded-xl bg-amber-50 border border-amber-200 p-4">
+              <div className="text-sm text-amber-900">도시락 신청 가능 시간</div>
+              <div className="mt-1 text-lg font-semibold text-amber-950">
+                {fmtDateTime(policy.application_start_at)} ~ {fmtDateTime(policy.application_end_at)}
+              </div>
+            </div>
+            <div className="mt-5 flex justify-end">
+              <button className="btn-primary" onClick={()=>setShowApplicationClosed(false)}>확인</button>
             </div>
           </div>
         </div>

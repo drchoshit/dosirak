@@ -42,6 +42,8 @@ db.exec(`
     allowed_weekdays TEXT DEFAULT 'MON,TUE,WED,THU,FRI',
     start_date TEXT,
     end_date TEXT,
+    application_start_at TEXT,
+    application_end_at TEXT,
     sms_extra_text TEXT
   );
   INSERT OR IGNORE INTO policy(id, base_price, allowed_weekdays)
@@ -76,6 +78,43 @@ db.exec(`
     date TEXT NOT NULL,
     slot TEXT NOT NULL CHECK (slot IN ('BOTH','LUNCH','DINNER'))
   );
+
+  CREATE TABLE IF NOT EXISTS carryovers(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id INTEGER NOT NULL,
+    from_date TEXT NOT NULL,
+    from_slot TEXT NOT NULL CHECK (from_slot IN ('LUNCH','DINNER')),
+    to_date TEXT NOT NULL,
+    to_slot TEXT NOT NULL CHECK (to_slot IN ('LUNCH','DINNER')),
+    portion TEXT NOT NULL DEFAULT 'BASE' CHECK (portion IN ('BASE','EXTRA')),
+    original_price INTEGER NOT NULL DEFAULT 0,
+    source_order_id INTEGER,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_carryovers_to_date_slot
+    ON carryovers(to_date, to_slot);
+  CREATE INDEX IF NOT EXISTS idx_carryovers_student_to_date
+    ON carryovers(student_id, to_date);
+
+  CREATE TABLE IF NOT EXISTS phone_orders(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    slot TEXT NOT NULL CHECK (slot IN ('LUNCH','DINNER')),
+    portion TEXT NOT NULL DEFAULT 'BASE' CHECK (portion IN ('BASE','EXTRA')),
+    price INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL CHECK (status IN ('SELECTED','PAID')),
+    memo TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(student_id, date, slot),
+    FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_phone_orders_date_slot
+    ON phone_orders(date, slot, status);
+  CREATE INDEX IF NOT EXISTS idx_phone_orders_student_date
+    ON phone_orders(student_id, date);
 `);
 
 // 헬퍼 (server.js와 시그니처 동일)

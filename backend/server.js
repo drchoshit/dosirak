@@ -143,6 +143,16 @@ const uploadExcel = multer({ dest: TMP_DIR });
       await run("UPDATE policy SET extra_price=12000 WHERE extra_price IS NULL");
       console.log("DB migrated: extra_price column added to policy table");
     }
+    const hasApplicationStart = cols.some((c) => c.name === "application_start_at");
+    if (!hasApplicationStart) {
+      await run("ALTER TABLE policy ADD COLUMN application_start_at TEXT");
+      console.log("DB migrated: application_start_at column added to policy table");
+    }
+    const hasApplicationEnd = cols.some((c) => c.name === "application_end_at");
+    if (!hasApplicationEnd) {
+      await run("ALTER TABLE policy ADD COLUMN application_end_at TEXT");
+      console.log("DB migrated: application_end_at column added to policy table");
+    }
 
     const orderCols = await all("PRAGMA table_info(orders)");
     const hasPortion = orderCols.some((c) => c.name === "portion");
@@ -151,6 +161,41 @@ const uploadExcel = multer({ dest: TMP_DIR });
       await run("UPDATE orders SET portion='BASE' WHERE portion IS NULL OR portion=''");
       console.log("DB migrated: portion column added to orders table");
     }
+    await run(`
+      CREATE TABLE IF NOT EXISTS carryovers(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id INTEGER NOT NULL,
+        from_date TEXT NOT NULL,
+        from_slot TEXT NOT NULL CHECK (from_slot IN ('LUNCH','DINNER')),
+        to_date TEXT NOT NULL,
+        to_slot TEXT NOT NULL CHECK (to_slot IN ('LUNCH','DINNER')),
+        portion TEXT NOT NULL DEFAULT 'BASE' CHECK (portion IN ('BASE','EXTRA')),
+        original_price INTEGER NOT NULL DEFAULT 0,
+        source_order_id INTEGER,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE
+      )
+    `);
+    await run("CREATE INDEX IF NOT EXISTS idx_carryovers_to_date_slot ON carryovers(to_date, to_slot)");
+    await run("CREATE INDEX IF NOT EXISTS idx_carryovers_student_to_date ON carryovers(student_id, to_date)");
+    await run(`
+      CREATE TABLE IF NOT EXISTS phone_orders(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id INTEGER NOT NULL,
+        date TEXT NOT NULL,
+        slot TEXT NOT NULL CHECK (slot IN ('LUNCH','DINNER')),
+        portion TEXT NOT NULL DEFAULT 'BASE' CHECK (portion IN ('BASE','EXTRA')),
+        price INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL CHECK (status IN ('SELECTED','PAID')),
+        memo TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(student_id, date, slot),
+        FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE
+      )
+    `);
+    await run("CREATE INDEX IF NOT EXISTS idx_phone_orders_date_slot ON phone_orders(date, slot, status)");
+    await run("CREATE INDEX IF NOT EXISTS idx_phone_orders_student_date ON phone_orders(student_id, date)");
   } catch (e) {
     console.error("DB migration check failed:", e);
   }
@@ -239,6 +284,133 @@ function parseExcelBufferToStudents(buf) {
       out.push(obj);
   }
   return out;
+}
+
+function normalizeSlot(slot) {
+  const v = String(slot || "").toUpperCase();
+  return v === "LUNCH" || v === "DINNER" ? v : null;
+}
+
+function normalizePortionValue(portion) {
+  return String(portion || "").toUpperCase() === "EXTRA" ? "EXTRA" : "BASE";
+}
+
+function kstDateTimeText(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const getPart = (type) => parts.find((p) => p.type === type)?.value || "";
+  return `${getPart("year")}-${getPart("month")}-${getPart("day")}T${getPart("hour")}:${getPart("minute")}`;
+}
+
+function normalizeDateTimeLocal(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const m = text.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/);
+  return m ? `${m[1]}T${m[2]}` : text;
+}
+
+function applicationWindow(policy) {
+  const start = normalizeDateTimeLocal(policy?.application_start_at);
+  const end = normalizeDateTimeLocal(policy?.application_end_at);
+  const now = kstDateTimeText();
+  const isOpen = (!start || now >= start) && (!end || now <= end);
+  return { start, end, now, is_open: isOpen };
+}
+
+async function getCarryoversForRange({ start, end, code, studentId, q } = {}) {
+  const where = [];
+  const params = [];
+  if (start) {
+    where.push("c.to_date >= ?");
+    params.push(start);
+  }
+  if (end) {
+    where.push("c.to_date <= ?");
+    params.push(end);
+  }
+  if (code) {
+    where.push("s.code = ?");
+    params.push(code);
+  }
+  if (studentId) {
+    where.push("s.id = ?");
+    params.push(studentId);
+  }
+  if (q && String(q).trim()) {
+    where.push("(s.name LIKE ? OR s.code LIKE ?)");
+    params.push(`%${q}%`, `%${q}%`);
+  }
+  const sql = `
+    SELECT
+      c.id,
+      c.student_id,
+      s.name,
+      s.code,
+      c.from_date,
+      c.from_slot,
+      c.to_date,
+      c.to_slot,
+      c.portion,
+      c.original_price,
+      c.created_at
+    FROM carryovers c
+    JOIN students s ON s.id = c.student_id
+    ${where.length ? "WHERE " + where.join(" AND ") : ""}
+    ORDER BY c.to_date ASC, c.to_slot ASC, s.name ASC
+  `;
+  return all(sql, params);
+}
+
+async function getPhoneOrdersForRange({ start, end, code, studentId, q } = {}) {
+  const where = ["po.status IN ('SELECTED','PAID')"];
+  const params = [];
+  if (start) {
+    where.push("po.date >= ?");
+    params.push(start);
+  }
+  if (end) {
+    where.push("po.date <= ?");
+    params.push(end);
+  }
+  if (code) {
+    where.push("s.code = ?");
+    params.push(code);
+  }
+  if (studentId) {
+    where.push("s.id = ?");
+    params.push(studentId);
+  }
+  if (q && String(q).trim()) {
+    where.push("(s.name LIKE ? OR s.code LIKE ?)");
+    params.push(`%${q}%`, `%${q}%`);
+  }
+  const sql = `
+    SELECT
+      po.id,
+      po.student_id,
+      s.name,
+      s.code,
+      po.date,
+      po.slot,
+      po.portion,
+      po.price,
+      po.status,
+      po.memo,
+      po.created_at,
+      po.updated_at
+    FROM phone_orders po
+    JOIN students s ON s.id = po.student_id
+    ${where.length ? "WHERE " + where.join(" AND ") : ""}
+    ORDER BY po.date ASC, po.slot ASC, s.name ASC
+  `;
+  return all(sql, params);
 }
 
 /* ===============================
@@ -477,6 +649,12 @@ app.get("/api/admin/export-json", async (_req, res) => {
     const orders = await all(
       "SELECT * FROM orders ORDER BY date ASC, slot ASC, student_id ASC"
     );
+    const carryovers = await all(
+      "SELECT * FROM carryovers ORDER BY to_date ASC, to_slot ASC, student_id ASC"
+    );
+    const phone_orders = await all(
+      "SELECT * FROM phone_orders ORDER BY date ASC, slot ASC, student_id ASC"
+    );
     const blackout = await all("SELECT * FROM blackout ORDER BY date, slot");
     const menu_images = await all(
       "SELECT * FROM menu_images ORDER BY uploaded_at DESC"
@@ -512,6 +690,8 @@ app.get("/api/admin/export-json", async (_req, res) => {
       policy,
       students,
       orders,
+      carryovers,
+      phone_orders,
       blackout,
       menu_images,
       summary_by_student: Array.from(summaryMap.values()),
@@ -586,16 +766,20 @@ app.post("/api/admin/policy", async (req, res) => {
     allowed_weekdays,
     start_date,
     end_date,
+    application_start_at,
+    application_end_at,
     sms_extra_text,
   } = req.body || {};
   await run(
-    "UPDATE policy SET base_price=?, extra_price=?, allowed_weekdays=?, start_date=?, end_date=?, sms_extra_text=? WHERE id=1",
+    "UPDATE policy SET base_price=?, extra_price=?, allowed_weekdays=?, start_date=?, end_date=?, application_start_at=?, application_end_at=?, sms_extra_text=? WHERE id=1",
     [
       base_price,
       extra_price,
       allowed_weekdays,
       start_date,
       end_date,
+      normalizeDateTimeLocal(application_start_at) || null,
+      normalizeDateTimeLocal(application_end_at) || null,
       sms_extra_text ?? null,
     ]
   );
@@ -685,6 +869,12 @@ app.get("/api/policy/active", async (req, res) => {
   const bl = await all("SELECT * FROM blackout");
   const basePrice = s.price_override ?? g.base_price ?? 0;
   const extraPrice = g.extra_price ?? basePrice;
+  const appWindow = applicationWindow(g);
+  const carryovers = await getCarryoversForRange({
+    start: start_date || null,
+    end: end_date || null,
+    studentId: s.id,
+  });
 
   res.json({
     base_price: basePrice,
@@ -692,6 +882,11 @@ app.get("/api/policy/active", async (req, res) => {
     allowed_weekdays: Array.from(allowed),
     start_date,
     end_date,
+    application_start_at: appWindow.start || null,
+    application_end_at: appWindow.end || null,
+    application_now: appWindow.now,
+    application_is_open: appWindow.is_open,
+    carryovers,
     no_service_days: bl,
     student: { id: s.id, name: s.name, code: s.code },
     sms_extra_text: g?.sms_extra_text ?? null,
@@ -713,8 +908,18 @@ app.post("/api/orders/commit", async (req, res) => {
       return res.status(404).json({ ok: false, error: "student not found" });
 
     const g = await get(
-      "SELECT base_price, extra_price, start_date, end_date FROM policy WHERE id=1"
+      "SELECT base_price, extra_price, start_date, end_date, application_start_at, application_end_at FROM policy WHERE id=1"
     );
+    const appWindow = applicationWindow(g);
+    if (!appWindow.is_open) {
+      return res.status(403).json({
+        ok: false,
+        error: "APPLICATION_CLOSED",
+        application_start_at: appWindow.start || null,
+        application_end_at: appWindow.end || null,
+        application_now: appWindow.now,
+      });
+    }
     const basePrice = s.price_override ?? g?.base_price ?? 0;
     const extraPrice = g?.extra_price ?? basePrice;
 
@@ -867,7 +1072,7 @@ app.get("/api/admin/orders", async (req, res) => {
 
     const sql = `
       SELECT 
-        o.id, o.date, o.slot, o.price, o.status,
+        o.id, o.date, o.slot, o.portion, o.price, o.status,
         s.id AS student_id, s.name, s.code
       FROM orders o
       JOIN students s ON s.id = o.student_id
@@ -895,6 +1100,7 @@ app.get("/api/admin/orders", async (req, res) => {
         id: r.id,
         date: r.date,
         slot: r.slot,
+        portion: r.portion || "BASE",
         price: r.price,
         status: r.status,
       });
@@ -902,7 +1108,9 @@ app.get("/api/admin/orders", async (req, res) => {
       g.total_amount += Number(r.price || 0);
     }
 
-    res.json({ ok: true, rows, groups: Array.from(byStudent.values()) });
+    const carryovers = await getCarryoversForRange({ start, end, q });
+
+    res.json({ ok: true, rows, groups: Array.from(byStudent.values()), carryovers });
   } catch (e) {
     console.error("GET /api/admin/orders error:", e);
     res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -917,6 +1125,89 @@ app.delete("/api/admin/orders/:id", async (req, res) => {
     res.json({ ok: true, deleted: Number(r?.changes || 0) });
   } catch (e) {
     console.error("DELETE /api/admin/orders/:id error:", e);
+    res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post("/api/admin/orders/:id/carryover", async (req, res) => {
+  try {
+    const sourceId = Number(req.params.id);
+    const toDate = String(req.body?.to_date || "").trim();
+    const toSlot = normalizeSlot(req.body?.to_slot);
+    if (!sourceId || !/^\d{4}-\d{2}-\d{2}$/.test(toDate) || !toSlot) {
+      return res.status(400).json({ ok: false, error: "target date/slot required" });
+    }
+
+    const src = await get(
+      `
+      SELECT o.*, s.name, s.code
+      FROM orders o
+      JOIN students s ON s.id = o.student_id
+      WHERE o.id=?
+      `,
+      [sourceId]
+    );
+    if (!src) return res.status(404).json({ ok: false, error: "source order not found" });
+
+    const duplicateOrder = await get(
+      "SELECT id FROM orders WHERE student_id=? AND date=? AND slot=?",
+      [src.student_id, toDate, toSlot]
+    );
+    const duplicateCarryover = await get(
+      "SELECT id FROM carryovers WHERE student_id=? AND to_date=? AND to_slot=?",
+      [src.student_id, toDate, toSlot]
+    );
+    const duplicatePhone = await get(
+      "SELECT id FROM phone_orders WHERE student_id=? AND date=? AND slot=?",
+      [src.student_id, toDate, toSlot]
+    );
+    if (duplicateOrder || duplicateCarryover || duplicatePhone) {
+      return res.status(409).json({ ok: false, error: "이미 해당 날짜/구분에 신청 또는 이월 기록이 있습니다." });
+    }
+
+    await run("BEGIN IMMEDIATE");
+    try {
+      await run(
+        `
+        INSERT INTO carryovers(
+          student_id, from_date, from_slot, to_date, to_slot, portion,
+          original_price, source_order_id, created_at
+        )
+        VALUES(?,?,?,?,?,?,?,?,?)
+        `,
+        [
+          src.student_id,
+          src.date,
+          src.slot,
+          toDate,
+          toSlot,
+          normalizePortionValue(src.portion),
+          Number(src.price || 0),
+          sourceId,
+          dayjs().toISOString(),
+        ]
+      );
+      await run("DELETE FROM orders WHERE id=?", [sourceId]);
+      await run("COMMIT");
+    } catch (txErr) {
+      try {
+        await run("ROLLBACK");
+      } catch {}
+      throw txErr;
+    }
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("POST /api/admin/orders/:id/carryover error:", e);
+    res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.delete("/api/admin/carryovers/:id", async (req, res) => {
+  try {
+    const r = await run("DELETE FROM carryovers WHERE id=?", [req.params.id]);
+    res.json({ ok: true, deleted: Number(r?.changes || 0) });
+  } catch (e) {
     res.status(400).json({ ok: false, error: String(e?.message || e) });
   }
 });
@@ -973,6 +1264,73 @@ app.post("/api/admin/orders/cancel-student", async (req, res) => {
   }
 });
 
+app.get("/api/admin/phone-orders", async (req, res) => {
+  try {
+    const { start, end, q } = req.query || {};
+    const rows = await getPhoneOrdersForRange({ start, end, q });
+    res.json({ ok: true, rows });
+  } catch (e) {
+    console.error("GET /api/admin/phone-orders error:", e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post("/api/admin/phone-orders", async (req, res) => {
+  try {
+    const code = String(req.body?.code || "").trim();
+    const date = String(req.body?.date || "").trim();
+    const slot = normalizeSlot(req.body?.slot);
+    const paid = !!req.body?.paid;
+    const memo = String(req.body?.memo || "").trim();
+    if (!code || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !slot) {
+      return res.status(400).json({ ok: false, error: "student/date/slot required" });
+    }
+    const s = await get("SELECT * FROM students WHERE code=?", [code]);
+    if (!s) return res.status(404).json({ ok: false, error: "student not found" });
+    const policy = await get("SELECT base_price FROM policy WHERE id=1");
+    const price = s.price_override ?? policy?.base_price ?? 0;
+    const now = dayjs().toISOString();
+
+    const duplicateOrder = await get(
+      "SELECT id FROM orders WHERE student_id=? AND date=? AND slot=?",
+      [s.id, date, slot]
+    );
+    const duplicateCarryover = await get(
+      "SELECT id FROM carryovers WHERE student_id=? AND to_date=? AND to_slot=?",
+      [s.id, date, slot]
+    );
+    if (duplicateOrder || duplicateCarryover) {
+      return res.status(409).json({ ok: false, error: "이미 해당 날짜/구분에 신청 또는 이월 기록이 있습니다." });
+    }
+
+    await run(
+      `
+      INSERT INTO phone_orders(student_id,date,slot,portion,price,status,memo,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(student_id,date,slot) DO UPDATE SET
+        price=excluded.price,
+        status=excluded.status,
+        memo=excluded.memo,
+        updated_at=excluded.updated_at
+      `,
+      [s.id, date, slot, "BASE", price, paid ? "PAID" : "SELECTED", memo || null, now, now]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("POST /api/admin/phone-orders error:", e);
+    res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.delete("/api/admin/phone-orders/:id", async (req, res) => {
+  try {
+    const r = await run("DELETE FROM phone_orders WHERE id=?", [req.params.id]);
+    res.json({ ok: true, deleted: Number(r?.changes || 0) });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 // ===============================
 // 학생 개인 신청 내역 조회
 // ===============================
@@ -990,19 +1348,43 @@ app.get("/api/student/orders/:code", async (req, res) => {
       `SELECT 
          o.date, 
          o.slot, 
+         o.portion,
          o.price, 
-         o.status
+         o.status,
+         'ORDER' AS source
        FROM orders o
        WHERE o.student_id=? 
        ORDER BY o.date ASC, o.slot ASC`,
       [s.id]
     );
+    const carryovers = (await getCarryoversForRange({ studentId: s.id })).map((c) => ({
+      date: c.to_date,
+      slot: c.to_slot,
+      portion: c.portion,
+      price: 0,
+      status: "PAID",
+      source: "CARRYOVER",
+      from_date: c.from_date,
+      from_slot: c.from_slot,
+    }));
+    const phoneOrders = (await getPhoneOrdersForRange({ studentId: s.id })).map((p) => ({
+      date: p.date,
+      slot: p.slot,
+      portion: p.portion,
+      price: p.price,
+      status: p.status,
+      source: "PHONE",
+    }));
+    const merged = [...rows, ...carryovers, ...phoneOrders].sort((a, b) => {
+      if (a.date !== b.date) return a.date.localeCompare(b.date);
+      return String(a.slot).localeCompare(String(b.slot));
+    });
 
     res.json({
       ok: true,
       student: s,
-      count: rows.length,
-      orders: rows,
+      count: merged.length,
+      orders: merged,
     });
   } catch (e) {
     console.error("GET /api/student/orders/:code error:", e);
@@ -1033,8 +1415,20 @@ app.get("/api/admin/weekly-summary", async (req, res) => {
   );
   // 결제된 건(=PAID)만 요약에 포함
   const orders = await all(
-    "SELECT student_id, date, slot FROM orders WHERE status='PAID' AND date BETWEEN ? AND ?",
-    [start, end]
+    `
+    SELECT student_id, date, slot
+      FROM orders
+     WHERE status='PAID' AND date BETWEEN ? AND ?
+    UNION ALL
+    SELECT student_id, to_date AS date, to_slot AS slot
+      FROM carryovers
+     WHERE to_date BETWEEN ? AND ?
+    UNION ALL
+    SELECT student_id, date, slot
+      FROM phone_orders
+     WHERE status='PAID' AND date BETWEEN ? AND ?
+    `,
+    [start, end, start, end, start, end]
   );
 
   const hasMap = new Map();
@@ -1125,34 +1519,35 @@ app.get("/api/admin/print", async (req, res) => {
   const { date } = req.query;
   if (!date) return res.status(400).json({ ok: false, error: "date required" });
 
-  // 학생 1명당 1행: PAID 여부는 MAX 집계로 판단
-  const lunchRows = await all(
-    `
-    SELECT s.id, s.name, s.code,
-           MAX(CASE WHEN o.status='PAID' THEN 1 ELSE 0 END) AS is_paid,
-           MAX(CASE WHEN o.portion='EXTRA' THEN 1 ELSE 0 END) AS is_extra
-      FROM orders o
-      JOIN students s ON o.student_id = s.id
-     WHERE o.date=? AND o.slot='LUNCH' AND o.status IN ('SELECTED','PAID')
-  GROUP BY s.id, s.name, s.code
-  ORDER BY is_paid DESC, s.name ASC
-    `,
-    [date]
-  );
+  const rowsForSlot = (slot) =>
+    all(
+      `
+      WITH meal_rows AS (
+        SELECT student_id, portion, status
+          FROM orders
+         WHERE date=? AND slot=? AND status IN ('SELECTED','PAID')
+        UNION ALL
+        SELECT student_id, portion, 'PAID' AS status
+          FROM carryovers
+         WHERE to_date=? AND to_slot=?
+        UNION ALL
+        SELECT student_id, portion, status
+          FROM phone_orders
+         WHERE date=? AND slot=? AND status IN ('SELECTED','PAID')
+      )
+      SELECT s.id, s.name, s.code,
+             MAX(CASE WHEN m.status='PAID' THEN 1 ELSE 0 END) AS is_paid,
+             MAX(CASE WHEN m.portion='EXTRA' THEN 1 ELSE 0 END) AS is_extra
+        FROM meal_rows m
+        JOIN students s ON m.student_id = s.id
+    GROUP BY s.id, s.name, s.code
+    ORDER BY is_paid DESC, s.name ASC
+      `,
+      [date, slot, date, slot, date, slot]
+    );
 
-  const dinnerRows = await all(
-    `
-    SELECT s.id, s.name, s.code,
-           MAX(CASE WHEN o.status='PAID' THEN 1 ELSE 0 END) AS is_paid,
-           MAX(CASE WHEN o.portion='EXTRA' THEN 1 ELSE 0 END) AS is_extra
-      FROM orders o
-      JOIN students s ON o.student_id = s.id
-     WHERE o.date=? AND o.slot='DINNER' AND o.status IN ('SELECTED','PAID')
-  GROUP BY s.id, s.name, s.code
-  ORDER BY is_paid DESC, s.name ASC
-    `,
-    [date]
-  );
+  const lunchRows = await rowsForSlot("LUNCH");
+  const dinnerRows = await rowsForSlot("DINNER");
 
   const lunch = lunchRows.map((r) => ({
     id: r.id,
@@ -1577,6 +1972,7 @@ const SPA_ROUTES = [
   "/student/history",  // ✅ 학생 마이페이지 추가
   "/admin",
   "/admin/orders",
+  "/admin/additional-orders",
   "/admin/print",
   "/payment/success",
   "/payment/fail",

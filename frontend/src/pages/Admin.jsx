@@ -693,6 +693,25 @@ export default function Admin() {
             <label className="text-sm">종료일
               <input type="date" value={policy.end_date || ""} onChange={e => setPolicy(p => ({ ...p, end_date: e.target.value }))} className="mt-1 w-full border rounded-xl px-3 py-2" />
             </label>
+            <label className="text-sm">도시락 신청 가능 시작
+              <input
+                type="datetime-local"
+                value={(policy.application_start_at || "").replace(" ", "T")}
+                onChange={e => setPolicy(p => ({ ...p, application_start_at: e.target.value }))}
+                className="mt-1 w-full border rounded-xl px-3 py-2"
+              />
+            </label>
+            <label className="text-sm">도시락 신청 가능 종료
+              <input
+                type="datetime-local"
+                value={(policy.application_end_at || "").replace(" ", "T")}
+                onChange={e => setPolicy(p => ({ ...p, application_end_at: e.target.value }))}
+                className="mt-1 w-full border rounded-xl px-3 py-2"
+              />
+            </label>
+            <div className="text-xs text-slate-500 sm:col-span-2">
+              이 기간 밖에서는 학생 신청 페이지에 신청 가능 시간이 표시되고, 온라인 신청 저장이 차단됩니다.
+            </div>
 
             <label className="text-sm sm:col-span-2">
               문자 추가 메모(고정 문구)
