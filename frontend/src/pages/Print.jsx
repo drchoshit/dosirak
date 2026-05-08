@@ -17,13 +17,17 @@ export default function Print() {
     const portion = item.portion === "EXTRA" ? "EXTRA" : "BASE";
     const portionLabel = portion === "EXTRA" ? "곱빼기" : "일반";
     const portionBadge = ` <span class="portion ${portion === "EXTRA" ? "portion-extra" : "portion-base"}">${portionLabel}</span>`;
+    const carryoverBadge =
+      item.source === "CARRYOVER"
+        ? ` <span class="badge-carryover">(이월)</span>`
+        : "";
     const strongOpen = item.status === "PAID" ? "<strong>" : "";
     const strongClose = item.status === "PAID" ? "</strong>" : "";
     const badge =
       item.status === "PAID"
         ? ""
         : ` <span class="badge-unpaid unpaid">미결제</span>`;
-    return `<span class="circle"></span>${strongOpen}${item.name}${code}${strongClose}${portionBadge}${badge}`;
+    return `<span class="circle"></span>${strongOpen}${item.name}${code}${strongClose}${portionBadge}${carryoverBadge}${badge}`;
   };
 
   /**
@@ -133,6 +137,10 @@ export default function Print() {
     }
     .portion-base{
       border-color:#cfd8e3; background:#f5f7fa; color:#334155;
+    }
+    .badge-carryover{
+      display:inline-block; margin-left:8pt; padding:2pt 6pt; font-size:10pt; font-weight:700; color:#065f46;
+      border:1px solid #a7f3d0; border-radius:6px; background:#ecfdf5;
     }
     .hide-unpaid .badge-unpaid { display:none !important; }
     .hide-extra .portion-extra { display:none !important; }

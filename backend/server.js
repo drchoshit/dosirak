@@ -1519,21 +1519,22 @@ app.get("/api/admin/print", async (req, res) => {
     all(
       `
       WITH meal_rows AS (
-        SELECT student_id, portion, status
+        SELECT student_id, portion, status, 0 AS is_carryover
           FROM orders
          WHERE date=? AND slot=? AND status IN ('SELECTED','PAID')
         UNION ALL
-        SELECT student_id, portion, 'PAID' AS status
+        SELECT student_id, portion, 'PAID' AS status, 1 AS is_carryover
           FROM carryovers
          WHERE to_date=? AND to_slot=?
         UNION ALL
-        SELECT student_id, portion, status
+        SELECT student_id, portion, status, 0 AS is_carryover
           FROM phone_orders
          WHERE date=? AND slot=? AND status IN ('SELECTED','PAID')
       )
       SELECT s.id, s.name, s.code,
              MAX(CASE WHEN m.status='PAID' THEN 1 ELSE 0 END) AS is_paid,
-             MAX(CASE WHEN m.portion='EXTRA' THEN 1 ELSE 0 END) AS is_extra
+             MAX(CASE WHEN m.portion='EXTRA' THEN 1 ELSE 0 END) AS is_extra,
+             MAX(CASE WHEN m.is_carryover=1 THEN 1 ELSE 0 END) AS is_carryover
         FROM meal_rows m
         JOIN students s ON m.student_id = s.id
     GROUP BY s.id, s.name, s.code
@@ -1551,6 +1552,7 @@ app.get("/api/admin/print", async (req, res) => {
     code: r.code,
     status: Number(r.is_paid) ? "PAID" : "SELECTED",
     portion: Number(r.is_extra) ? "EXTRA" : "BASE",
+    source: Number(r.is_carryover) ? "CARRYOVER" : "ORDER",
   }));
   const dinner = dinnerRows.map((r) => ({
     id: r.id,
@@ -1558,6 +1560,7 @@ app.get("/api/admin/print", async (req, res) => {
     code: r.code,
     status: Number(r.is_paid) ? "PAID" : "SELECTED",
     portion: Number(r.is_extra) ? "EXTRA" : "BASE",
+    source: Number(r.is_carryover) ? "CARRYOVER" : "ORDER",
   }));
 
   return res.json({
