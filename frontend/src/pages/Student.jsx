@@ -185,9 +185,7 @@ export default function Student(){
   }
 
   const carryoverItems = useMemo(() => {
-    const visibleDates = new Set(weekDates);
     return (policy?.carryovers || [])
-      .filter(c => !visibleDates.size || visibleDates.has(c.to_date))
       .map(c => ({
         date: c.to_date,
         slot: c.to_slot,
@@ -197,7 +195,7 @@ export default function Student(){
         from_date: c.from_date,
         from_slot: c.from_slot,
       }));
-  }, [policy, weekDates]);
+  }, [policy]);
 
   const carryoverMap = useMemo(() => {
     const m = new Map();
@@ -434,24 +432,27 @@ export default function Student(){
       <aside className="card p-5 lg:col-span-2 h-max">
         <h2 className="text-xl font-bold mb-3">결제 요약</h2>
         {(() => {
-          const groups = summaryItems.reduce((acc, it) => {
-            (acc[it.date] = acc[it.date] || []).push(it);
-            return acc;
-          }, {});
-          const rows = Object.entries(groups).map(([date, arr]) => {
-            const wd = weekdaysKo[new Date(date).getDay()];
-            const labels = arr.map(x => x.source === 'CARRYOVER' ? `${slotLabel(x.slot, x.portion)}(이월/0원)` : slotLabel(x.slot, x.portion)).sort();
-            const perDayTotal = arr.reduce((s,x)=> s + (x.price||0), 0);
-            return { date, wd, labels, perDayTotal, arr };
+          const rows = summaryItems.map((it, idx) => {
+            const wd = weekdaysKo[new Date(it.date).getDay()];
+            const label = it.source === 'CARRYOVER'
+              ? `${slotLabel(it.slot, it.portion)} (이월)`
+              : slotLabel(it.slot, it.portion);
+            return {
+              key: `${it.source || 'ORDER'}-${it.date}-${it.slot}-${idx}`,
+              date: it.date,
+              wd,
+              label,
+              price: Number(it.price || 0),
+            };
           }).sort((a,b)=> a.date.localeCompare(b.date));
           return (
             <>
               <div className="space-y-2 max-h-64 overflow-auto pr-1">
                 {summaryItems.length===0 && <div className="text-slate-500">선택 내역이 없습니다.</div>}
                 {rows.map((r) => (
-                  <div key={r.date} className="flex items-center justify-between text-sm">
-                    <div>{r.date} {r.wd} {r.labels.join(', ')}</div>
-                    <div className="font-semibold">{r.perDayTotal.toLocaleString()}원</div>
+                  <div key={r.key} className="flex items-center justify-between text-sm">
+                    <div>{r.date} {r.wd} {r.label}</div>
+                    <div className="font-semibold">{r.price.toLocaleString()}원</div>
                   </div>
                 ))}
               </div>

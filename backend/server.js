@@ -870,11 +870,7 @@ app.get("/api/policy/active", async (req, res) => {
   const basePrice = s.price_override ?? g.base_price ?? 0;
   const extraPrice = g.extra_price ?? basePrice;
   const appWindow = applicationWindow(g);
-  const carryovers = await getCarryoversForRange({
-    start: start_date || null,
-    end: end_date || null,
-    studentId: s.id,
-  });
+  const carryovers = await getCarryoversForRange({ studentId: s.id });
 
   res.json({
     base_price: basePrice,
