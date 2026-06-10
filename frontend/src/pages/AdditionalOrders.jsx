@@ -9,6 +9,11 @@ export default function AdditionalOrders() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [filters, setFilters] = useState({ start: "", end: "", q: "" });
+  const [carryoverModal, setCarryoverModal] = useState(null);
+  const [carryoverTarget, setCarryoverTarget] = useState({
+    to_date: "",
+    to_slot: "LUNCH",
+  });
   const [form, setForm] = useState({
     code: "",
     date: "",
@@ -88,6 +93,34 @@ export default function AdditionalOrders() {
     } catch (e) {
       const msg = e?.response?.data?.error || e.message || "삭제 실패";
       alert("삭제 실패: " + msg);
+    }
+  }
+
+  function openCarryover(row) {
+    setCarryoverModal(row);
+    setCarryoverTarget({ to_date: "", to_slot: row.slot || "LUNCH" });
+  }
+
+  async function submitCarryover() {
+    if (!carryoverModal) return;
+    if (!carryoverTarget.to_date || !carryoverTarget.to_slot) {
+      alert("이월할 날짜와 구분을 선택하세요.");
+      return;
+    }
+
+    const fromText = `${carryoverModal.date} ${SLOT_LABEL[carryoverModal.slot] || carryoverModal.slot}`;
+    const toText = `${carryoverTarget.to_date} ${SLOT_LABEL[carryoverTarget.to_slot] || carryoverTarget.to_slot}`;
+    if (!confirm(`${carryoverModal.name} 학생의 ${fromText} 추가 신청 도시락을 ${toText}으로 이월할까요?\n기존 추가 신청 행은 삭제되고, 이월 내역으로 관리됩니다.`)) {
+      return;
+    }
+
+    try {
+      await api.post(`/admin/phone-orders/${carryoverModal.id}/carryover`, carryoverTarget);
+      setCarryoverModal(null);
+      await loadRows();
+    } catch (e) {
+      const msg = e?.response?.data?.error || e.message || "이월 실패";
+      alert("이월 실패: " + msg);
     }
   }
 
@@ -202,7 +235,7 @@ export default function AdditionalOrders() {
         </div>
 
         <div className="mt-4 overflow-auto">
-          <table className="min-w-[900px] w-full text-sm border">
+          <table className="min-w-[960px] w-full text-sm border">
             <thead className="bg-slate-50">
               <tr>
                 <th className="p-2 border text-left">학생</th>
@@ -236,9 +269,14 @@ export default function AdditionalOrders() {
                   </td>
                   <td className="p-2 border">{r.memo || ""}</td>
                   <td className="p-2 border text-center">
-                    <button className="btn-ghost text-danger" onClick={() => remove(r.id)}>
-                      삭제
-                    </button>
+                    <div className="flex justify-center gap-2">
+                      <button className="btn-ghost" onClick={() => openCarryover(r)}>
+                        이월
+                      </button>
+                      <button className="btn-ghost text-danger" onClick={() => remove(r.id)}>
+                        삭제
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -253,6 +291,51 @@ export default function AdditionalOrders() {
           </table>
         </div>
       </div>
+
+      {carryoverModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl p-6 w-[90vw] max-w-md shadow-xl">
+            <div className="text-lg font-semibold mb-2">추가 신청자 도시락 이월</div>
+            <div className="text-sm text-slate-600 mb-4">
+              {carryoverModal.name} 학생의 {carryoverModal.date}{" "}
+              {SLOT_LABEL[carryoverModal.slot] || carryoverModal.slot} 추가 신청 도시락을
+              다른 날짜로 이월합니다.
+            </div>
+            <label className="block text-sm mb-3">
+              이월할 날짜
+              <input
+                type="date"
+                className="mt-1 input"
+                value={carryoverTarget.to_date}
+                onChange={(e) =>
+                  setCarryoverTarget((v) => ({ ...v, to_date: e.target.value }))
+                }
+              />
+            </label>
+            <label className="block text-sm">
+              구분
+              <select
+                className="mt-1 input"
+                value={carryoverTarget.to_slot}
+                onChange={(e) =>
+                  setCarryoverTarget((v) => ({ ...v, to_slot: e.target.value }))
+                }
+              >
+                <option value="LUNCH">점심</option>
+                <option value="DINNER">저녁</option>
+              </select>
+            </label>
+            <div className="flex justify-end gap-2 mt-5">
+              <button className="btn-ghost" onClick={() => setCarryoverModal(null)}>
+                취소
+              </button>
+              <button className="btn-primary" onClick={submitCarryover}>
+                이월 저장
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
