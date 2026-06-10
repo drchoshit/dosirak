@@ -1199,6 +1199,80 @@ app.post("/api/admin/orders/:id/carryover", async (req, res) => {
   }
 });
 
+app.post("/api/admin/phone-orders/:id/carryover", async (req, res) => {
+  try {
+    const sourceId = Number(req.params.id);
+    const toDate = String(req.body?.to_date || "").trim();
+    const toSlot = normalizeSlot(req.body?.to_slot);
+    if (!sourceId || !/^\d{4}-\d{2}-\d{2}$/.test(toDate) || !toSlot) {
+      return res.status(400).json({ ok: false, error: "target date/slot required" });
+    }
+
+    const src = await get(
+      `
+      SELECT po.*, s.name, s.code
+      FROM phone_orders po
+      JOIN students s ON s.id = po.student_id
+      WHERE po.id=?
+      `,
+      [sourceId]
+    );
+    if (!src) return res.status(404).json({ ok: false, error: "source phone order not found" });
+
+    const duplicateOrder = await get(
+      "SELECT id FROM orders WHERE student_id=? AND date=? AND slot=?",
+      [src.student_id, toDate, toSlot]
+    );
+    const duplicateCarryover = await get(
+      "SELECT id FROM carryovers WHERE student_id=? AND to_date=? AND to_slot=?",
+      [src.student_id, toDate, toSlot]
+    );
+    const duplicatePhone = await get(
+      "SELECT id FROM phone_orders WHERE student_id=? AND date=? AND slot=?",
+      [src.student_id, toDate, toSlot]
+    );
+    if (duplicateOrder || duplicateCarryover || duplicatePhone) {
+      return res.status(409).json({ ok: false, error: "이미 해당 날짜/구분에 신청 또는 이월 기록이 있습니다." });
+    }
+
+    await run("BEGIN IMMEDIATE");
+    try {
+      await run(
+        `
+        INSERT INTO carryovers(
+          student_id, from_date, from_slot, to_date, to_slot, portion,
+          original_price, source_order_id, created_at
+        )
+        VALUES(?,?,?,?,?,?,?,?,?)
+        `,
+        [
+          src.student_id,
+          src.date,
+          src.slot,
+          toDate,
+          toSlot,
+          normalizePortionValue(src.portion),
+          Number(src.price || 0),
+          null,
+          dayjs().toISOString(),
+        ]
+      );
+      await run("DELETE FROM phone_orders WHERE id=?", [sourceId]);
+      await run("COMMIT");
+    } catch (txErr) {
+      try {
+        await run("ROLLBACK");
+      } catch {}
+      throw txErr;
+    }
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("POST /api/admin/phone-orders/:id/carryover error:", e);
+    res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 app.delete("/api/admin/carryovers/:id", async (req, res) => {
   try {
     const r = await run("DELETE FROM carryovers WHERE id=?", [req.params.id]);
