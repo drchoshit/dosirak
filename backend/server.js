@@ -1125,6 +1125,26 @@ app.delete("/api/admin/orders/:id", async (req, res) => {
   }
 });
 
+app.patch("/api/admin/orders/:id/payment", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const status = req.body?.paid ? "PAID" : "SELECTED";
+    if (!id) return res.status(400).json({ ok: false, error: "order id required" });
+
+    const r = await run(
+      "UPDATE orders SET status=?, updated_at=? WHERE id=? AND status IN ('SELECTED','PAID')",
+      [status, dayjs().toISOString(), id]
+    );
+    if (!Number(r?.changes || 0)) {
+      return res.status(404).json({ ok: false, error: "order not found" });
+    }
+    res.json({ ok: true, status });
+  } catch (e) {
+    console.error("PATCH /api/admin/orders/:id/payment error:", e);
+    res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 app.post("/api/admin/orders/:id/carryover", async (req, res) => {
   try {
     const sourceId = Number(req.params.id);
@@ -1397,6 +1417,26 @@ app.delete("/api/admin/phone-orders/:id", async (req, res) => {
     const r = await run("DELETE FROM phone_orders WHERE id=?", [req.params.id]);
     res.json({ ok: true, deleted: Number(r?.changes || 0) });
   } catch (e) {
+    res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.patch("/api/admin/phone-orders/:id/payment", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const status = req.body?.paid ? "PAID" : "SELECTED";
+    if (!id) return res.status(400).json({ ok: false, error: "phone order id required" });
+
+    const r = await run(
+      "UPDATE phone_orders SET status=?, updated_at=? WHERE id=? AND status IN ('SELECTED','PAID')",
+      [status, dayjs().toISOString(), id]
+    );
+    if (!Number(r?.changes || 0)) {
+      return res.status(404).json({ ok: false, error: "phone order not found" });
+    }
+    res.json({ ok: true, status });
+  } catch (e) {
+    console.error("PATCH /api/admin/phone-orders/:id/payment error:", e);
     res.status(400).json({ ok: false, error: String(e?.message || e) });
   }
 });

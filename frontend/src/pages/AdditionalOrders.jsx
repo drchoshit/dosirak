@@ -8,6 +8,7 @@ export default function AdditionalOrders() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [paymentSavingId, setPaymentSavingId] = useState(null);
   const [filters, setFilters] = useState({ start: "", end: "", q: "" });
   const [carryoverModal, setCarryoverModal] = useState(null);
   const [carryoverTarget, setCarryoverTarget] = useState({
@@ -93,6 +94,22 @@ export default function AdditionalOrders() {
     } catch (e) {
       const msg = e?.response?.data?.error || e.message || "삭제 실패";
       alert("삭제 실패: " + msg);
+    }
+  }
+
+  async function markPhoneOrderPayment(id, paid) {
+    setPaymentSavingId(id);
+    try {
+      const res = await api.patch(`/admin/phone-orders/${id}/payment`, { paid });
+      const status = res.data?.status || (paid ? "PAID" : "SELECTED");
+      setRows((list) =>
+        list.map((row) => (row.id === id ? { ...row, status } : row))
+      );
+    } catch (e) {
+      const msg = e?.response?.data?.error || e.message || "입금 상태 변경 실패";
+      alert("입금 상태 변경 실패: " + msg);
+    } finally {
+      setPaymentSavingId(null);
     }
   }
 
@@ -235,7 +252,7 @@ export default function AdditionalOrders() {
         </div>
 
         <div className="mt-4 overflow-auto">
-          <table className="min-w-[960px] w-full text-sm border">
+          <table className="min-w-[1080px] w-full text-sm border">
             <thead className="bg-slate-50">
               <tr>
                 <th className="p-2 border text-left">학생</th>
@@ -248,38 +265,66 @@ export default function AdditionalOrders() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
-                <tr key={r.id} className="hover:bg-slate-50">
-                  <td className="p-2 border">
-                    {r.name} <span className="text-slate-500">({r.code})</span>
-                  </td>
-                  <td className="p-2 border text-center">{r.date}</td>
-                  <td className="p-2 border text-center">
-                    {SLOT_LABEL[r.slot] || r.slot}
-                  </td>
-                  <td className="p-2 border text-right">
-                    {Number(r.price || 0).toLocaleString()}원
-                  </td>
-                  <td className="p-2 border text-center">
-                    {r.status === "PAID" ? (
-                      <span className="text-emerald-600 font-semibold">입금</span>
-                    ) : (
-                      <span className="text-slate-600">미입금</span>
-                    )}
-                  </td>
-                  <td className="p-2 border">{r.memo || ""}</td>
-                  <td className="p-2 border text-center">
-                    <div className="flex justify-center gap-2">
-                      <button className="btn-ghost" onClick={() => openCarryover(r)}>
-                        이월
-                      </button>
-                      <button className="btn-ghost text-danger" onClick={() => remove(r.id)}>
-                        삭제
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+              {rows.map((r) => {
+                const isPaid = r.status === "PAID";
+                const savingPayment = paymentSavingId === r.id;
+                return (
+                  <tr key={r.id} className="hover:bg-slate-50">
+                    <td className="p-2 border">
+                      {r.name} <span className="text-slate-500">({r.code})</span>
+                    </td>
+                    <td className="p-2 border text-center">{r.date}</td>
+                    <td className="p-2 border text-center">
+                      {SLOT_LABEL[r.slot] || r.slot}
+                    </td>
+                    <td className="p-2 border text-right">
+                      {Number(r.price || 0).toLocaleString()}원
+                    </td>
+                    <td className="p-2 border text-center">
+                      {isPaid ? (
+                        <span className="text-emerald-600 font-semibold">입금</span>
+                      ) : (
+                        <span className="text-slate-600">미입금</span>
+                      )}
+                    </td>
+                    <td className="p-2 border">{r.memo || ""}</td>
+                    <td className="p-2 border text-center">
+                      <div className="flex flex-wrap justify-center gap-2">
+                        <button
+                          type="button"
+                          className={
+                            isPaid
+                              ? "btn-primary text-sm px-3 py-1"
+                              : "btn-ghost text-sm px-3 py-1"
+                          }
+                          disabled={savingPayment}
+                          onClick={() => markPhoneOrderPayment(r.id, true)}
+                        >
+                          입금
+                        </button>
+                        <button
+                          type="button"
+                          className={
+                            !isPaid
+                              ? "btn-primary text-sm px-3 py-1"
+                              : "btn-ghost text-sm px-3 py-1"
+                          }
+                          disabled={savingPayment}
+                          onClick={() => markPhoneOrderPayment(r.id, false)}
+                        >
+                          미입금
+                        </button>
+                        <button className="btn-ghost" onClick={() => openCarryover(r)}>
+                          이월
+                        </button>
+                        <button className="btn-ghost text-danger" onClick={() => remove(r.id)}>
+                          삭제
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
               {!rows.length && (
                 <tr>
                   <td colSpan={7} className="p-4 text-center text-slate-500">

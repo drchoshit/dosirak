@@ -17,6 +17,7 @@ export default function OrdersPage() {
   const [loading, setLoading] = useState(false);
   const [groups, setGroups] = useState([]);
   const [carryovers, setCarryovers] = useState([]);
+  const [paymentSavingId, setPaymentSavingId] = useState(null);
   const [carryoverModal, setCarryoverModal] = useState(null);
   const [carryoverTarget, setCarryoverTarget] = useState({
     to_date: "",
@@ -80,6 +81,27 @@ export default function OrdersPage() {
     } catch (e) {
       const msg = e?.response?.data?.error || e.message || "취소 실패";
       alert("취소 실패: " + msg);
+    }
+  }
+
+  async function markOrderPayment(orderId, paid) {
+    setPaymentSavingId(orderId);
+    try {
+      const res = await api.patch(`/admin/orders/${orderId}/payment`, { paid });
+      const status = res.data?.status || (paid ? "PAID" : "SELECTED");
+      setGroups((list) =>
+        list.map((g) => ({
+          ...g,
+          items: g.items.map((it) =>
+            it.id === orderId ? { ...it, status } : it
+          ),
+        }))
+      );
+    } catch (e) {
+      const msg = e?.response?.data?.error || e.message || "결제 상태 변경 실패";
+      alert("결제 상태 변경 실패: " + msg);
+    } finally {
+      setPaymentSavingId(null);
     }
   }
 
@@ -281,45 +303,68 @@ export default function OrdersPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {g.items.map((it) => (
-                    <tr key={it.id} className="hover:bg-slate-50">
-                      <td className="p-2 border">{it.date}</td>
-                      <td className="p-2 border text-center">
-                        {SLOT_LABEL[it.slot] || it.slot}
-                      </td>
-                      <td className="p-2 border text-center">
-                        {PORTION_LABEL[it.portion] || "기본"}
-                      </td>
-                      <td className="p-2 border text-right">
-                        {Number(it.price || 0).toLocaleString()}원
-                      </td>
-                      <td className="p-2 border text-center">
-                        {it.status === "PAID" ? (
-                          <span className="text-emerald-600 font-semibold">
-                            결제
-                          </span>
-                        ) : (
-                          <span className="text-slate-600">미결제</span>
-                        )}
-                      </td>
-                      <td className="p-2 border text-center">
-                        <button
-                          className="btn-ghost"
-                          onClick={() => openCarryover(g, it)}
-                        >
-                          이월
-                        </button>
-                      </td>
-                      <td className="p-2 border text-center">
-                        <button
-                          className="btn-ghost text-danger"
-                          onClick={() => cancelOne(it.id)}
-                        >
-                          취소
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {g.items.map((it) => {
+                    const isPaid = it.status === "PAID";
+                    const saving = paymentSavingId === it.id;
+                    return (
+                      <tr key={it.id} className="hover:bg-slate-50">
+                        <td className="p-2 border">{it.date}</td>
+                        <td className="p-2 border text-center">
+                          {SLOT_LABEL[it.slot] || it.slot}
+                        </td>
+                        <td className="p-2 border text-center">
+                          {PORTION_LABEL[it.portion] || "기본"}
+                        </td>
+                        <td className="p-2 border text-right">
+                          {Number(it.price || 0).toLocaleString()}원
+                        </td>
+                        <td className="p-2 border text-center">
+                          <div className="flex flex-wrap justify-center gap-2">
+                            <button
+                              type="button"
+                              className={
+                                isPaid
+                                  ? "btn-primary text-sm px-3 py-1"
+                                  : "btn-ghost text-sm px-3 py-1"
+                              }
+                              disabled={saving}
+                              onClick={() => markOrderPayment(it.id, true)}
+                            >
+                              결제
+                            </button>
+                            <button
+                              type="button"
+                              className={
+                                !isPaid
+                                  ? "btn-primary text-sm px-3 py-1"
+                                  : "btn-ghost text-sm px-3 py-1"
+                              }
+                              disabled={saving}
+                              onClick={() => markOrderPayment(it.id, false)}
+                            >
+                              미결제
+                            </button>
+                          </div>
+                        </td>
+                        <td className="p-2 border text-center">
+                          <button
+                            className="btn-ghost"
+                            onClick={() => openCarryover(g, it)}
+                          >
+                            이월
+                          </button>
+                        </td>
+                        <td className="p-2 border text-center">
+                          <button
+                            className="btn-ghost text-danger"
+                            onClick={() => cancelOne(it.id)}
+                          >
+                            취소
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
                   {!g.items.length && (
                     <tr>
                       <td
