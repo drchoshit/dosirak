@@ -57,6 +57,7 @@ db.exec(`
     portion TEXT NOT NULL DEFAULT 'BASE' CHECK (portion IN ('BASE','EXTRA')),
     price INTEGER NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('SELECTED','PAID')),
+    carryover_coupon_id INTEGER,
     created_at TEXT,
     updated_at TEXT,
     UNIQUE(student_id, date, slot),
@@ -97,6 +98,24 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_carryovers_student_to_date
     ON carryovers(student_id, to_date);
 
+  CREATE TABLE IF NOT EXISTS carryover_coupons(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id INTEGER NOT NULL,
+    from_date TEXT NOT NULL,
+    from_slot TEXT NOT NULL CHECK (from_slot IN ('LUNCH','DINNER')),
+    portion TEXT NOT NULL DEFAULT 'BASE' CHECK (portion IN ('BASE','EXTRA')),
+    original_price INTEGER NOT NULL DEFAULT 0,
+    source_type TEXT NOT NULL DEFAULT 'ORDER' CHECK (source_type IN ('ORDER','PHONE')),
+    source_order_id INTEGER,
+    used_order_id INTEGER,
+    used_at TEXT,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_carryover_coupons_student
+    ON carryover_coupons(student_id, used_order_id);
+
   CREATE TABLE IF NOT EXISTS phone_orders(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     student_id INTEGER NOT NULL,
@@ -116,6 +135,26 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_phone_orders_student_date
     ON phone_orders(student_id, date);
 `);
+
+// Existing databases need the coupon link column before server routes are registered.
+const orderColumns = db.prepare('PRAGMA table_info(orders)').all();
+if (!orderColumns.some((column) => column.name === 'carryover_coupon_id')) {
+  db.exec('ALTER TABLE orders ADD COLUMN carryover_coupon_id INTEGER');
+}
+db.exec(`
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_carryover_coupon
+    ON orders(carryover_coupon_id) WHERE carryover_coupon_id IS NOT NULL
+`);
+
+const couponColumns = db.prepare('PRAGMA table_info(carryover_coupons)').all();
+if (!couponColumns.some((column) => column.name === 'expires_at')) {
+  db.exec('ALTER TABLE carryover_coupons ADD COLUMN expires_at TEXT');
+  db.exec(`
+    UPDATE carryover_coupons
+       SET expires_at=datetime(created_at, '+7 days')
+     WHERE expires_at IS NULL OR expires_at=''
+  `);
+}
 
 // 헬퍼 (server.js와 시그니처 동일)
 export function all(sql, params = []) {

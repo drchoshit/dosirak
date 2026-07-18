@@ -18,11 +18,6 @@ export default function OrdersPage() {
   const [groups, setGroups] = useState([]);
   const [carryovers, setCarryovers] = useState([]);
   const [paymentSavingId, setPaymentSavingId] = useState(null);
-  const [carryoverModal, setCarryoverModal] = useState(null);
-  const [carryoverTarget, setCarryoverTarget] = useState({
-    to_date: "",
-    to_slot: "LUNCH",
-  });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -35,7 +30,7 @@ export default function OrdersPage() {
         "/admin/orders" + (params.toString() ? "?" + params.toString() : "")
       );
       setGroups(res.data?.groups || []);
-      setCarryovers(res.data?.carryovers || []);
+      setCarryovers(res.data?.carryover_coupons || []);
     } catch (e) {
       console.error(e);
       alert("신청 리스트를 가져오지 못했습니다.");
@@ -105,26 +100,13 @@ export default function OrdersPage() {
     }
   }
 
-  function openCarryover(studentGroup, order) {
-    setCarryoverModal({ student: studentGroup, order });
-    setCarryoverTarget({ to_date: "", to_slot: order.slot || "LUNCH" });
-  }
-
-  async function submitCarryover() {
-    if (!carryoverModal) return;
-    if (!carryoverTarget.to_date || !carryoverTarget.to_slot) {
-      alert("이월할 날짜와 구분을 선택하세요.");
-      return;
-    }
-    const { student, order } = carryoverModal;
+  async function openCarryover(student, order) {
     const fromText = `${order.date} ${SLOT_LABEL[order.slot] || order.slot}`;
-    const toText = `${carryoverTarget.to_date} ${SLOT_LABEL[carryoverTarget.to_slot] || carryoverTarget.to_slot}`;
-    if (!confirm(`${student.name} 학생의 ${fromText} 식사를 ${toText}으로 이월할까요?\n기존 신청 행은 신청 리스트에서 삭제되고, 이월 내역으로 관리됩니다.`)) {
+    if (!confirm(`${student.name} 학생의 ${fromText} 식사를 이월 쿠폰 1장으로 바꿀까요?\n기존 신청 행은 삭제되고 학생이 다음 신청 때 원하는 식사에 쿠폰을 적용할 수 있습니다.`)) {
       return;
     }
     try {
-      await api.post(`/admin/orders/${order.id}/carryover`, carryoverTarget);
-      setCarryoverModal(null);
+      await api.post(`/admin/orders/${order.id}/carryover-coupon`);
       await load();
     } catch (e) {
       const msg = e?.response?.data?.error || e.message || "이월 실패";
@@ -133,9 +115,9 @@ export default function OrdersPage() {
   }
 
   async function deleteCarryover(id) {
-    if (!confirm("이월 내역을 삭제할까요? 원래 신청 행은 자동 복구되지 않습니다.")) return;
+    if (!confirm("사용하지 않은 이월 쿠폰을 삭제할까요? 원래 신청 행은 자동 복구되지 않습니다.")) return;
     try {
-      await api.delete(`/admin/carryovers/${id}`);
+      await api.delete(`/admin/carryover-coupons/${id}`);
       await load();
     } catch (e) {
       const msg = e?.response?.data?.error || e.message || "삭제 실패";
@@ -189,9 +171,9 @@ export default function OrdersPage() {
       <div className="card p-5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h2 className="text-lg font-bold">이월자</h2>
+            <h2 className="text-lg font-bold">이월 쿠폰</h2>
             <div className="text-sm text-slate-500">
-              선택한 조회 기간에 반영될 이월 식수입니다. 학생 신청 페이지와 인쇄 명단에는 이 날짜 기준으로 표시됩니다.
+              이월 처리된 원래 식사와 쿠폰 사용 상태입니다. 미사용 쿠폰은 학생이 다음 신청에서 원하는 식사에 적용할 수 있습니다.
             </div>
           </div>
           <div className="text-sm text-slate-500">
@@ -205,8 +187,8 @@ export default function OrdersPage() {
               <tr>
                 <th className="p-2 border text-left">학생</th>
                 <th className="p-2 border text-center">원래 날짜</th>
-                <th className="p-2 border text-center">이월 날짜</th>
-                <th className="p-2 border text-center">구분</th>
+                <th className="p-2 border text-center">쿠폰 상태</th>
+                <th className="p-2 border text-center">원래 식사</th>
                 <th className="p-2 border text-right">기존 결제액</th>
                 <th className="p-2 border text-center">관리</th>
               </tr>
@@ -221,10 +203,12 @@ export default function OrdersPage() {
                     {c.from_date} {SLOT_LABEL[c.from_slot] || c.from_slot}
                   </td>
                   <td className="p-2 border text-center">
-                    {c.to_date} {SLOT_LABEL[c.to_slot] || c.to_slot}
+                    {c.used_order_id
+                      ? `사용 완료 (${c.used_date} ${SLOT_LABEL[c.used_slot] || c.used_slot})`
+                      : "사용 가능"}
                   </td>
                   <td className="p-2 border text-center">
-                    {mealLabel(c.to_slot, c.portion)}
+                    {mealLabel(c.from_slot, c.portion)}
                   </td>
                   <td className="p-2 border text-right">
                     {Number(c.original_price || 0).toLocaleString()}원
@@ -232,9 +216,10 @@ export default function OrdersPage() {
                   <td className="p-2 border text-center">
                     <button
                       className="btn-ghost text-danger"
+                      disabled={!!c.used_order_id}
                       onClick={() => deleteCarryover(c.id)}
                     >
-                      삭제
+                      {c.used_order_id ? "사용됨" : "삭제"}
                     </button>
                   </td>
                 </tr>
@@ -242,7 +227,7 @@ export default function OrdersPage() {
               {!carryovers.length && (
                 <tr>
                   <td colSpan={6} className="p-4 text-center text-slate-500">
-                    조회된 이월자가 없습니다.
+                    조회된 이월 쿠폰이 없습니다.
                   </td>
                 </tr>
               )}
@@ -351,7 +336,7 @@ export default function OrdersPage() {
                             className="btn-ghost"
                             onClick={() => openCarryover(g, it)}
                           >
-                            이월
+                            이월 쿠폰 발급
                           </button>
                         </td>
                         <td className="p-2 border text-center">
@@ -388,50 +373,6 @@ export default function OrdersPage() {
         </div>
       </div>
 
-      {carryoverModal && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl p-6 w-[90vw] max-w-md shadow-xl">
-            <div className="text-lg font-semibold mb-2">도시락 이월</div>
-            <div className="text-sm text-slate-600 mb-4">
-              {carryoverModal.student.name} 학생의 {carryoverModal.order.date}{" "}
-              {mealLabel(carryoverModal.order.slot, carryoverModal.order.portion)} 식사를
-              다른 날짜로 이월합니다.
-            </div>
-            <label className="block text-sm mb-3">
-              이월할 날짜
-              <input
-                type="date"
-                className="mt-1 input"
-                value={carryoverTarget.to_date}
-                onChange={(e) =>
-                  setCarryoverTarget((v) => ({ ...v, to_date: e.target.value }))
-                }
-              />
-            </label>
-            <label className="block text-sm">
-              구분
-              <select
-                className="mt-1 input"
-                value={carryoverTarget.to_slot}
-                onChange={(e) =>
-                  setCarryoverTarget((v) => ({ ...v, to_slot: e.target.value }))
-                }
-              >
-                <option value="LUNCH">점심</option>
-                <option value="DINNER">저녁</option>
-              </select>
-            </label>
-            <div className="flex justify-end gap-2 mt-5">
-              <button className="btn-ghost" onClick={() => setCarryoverModal(null)}>
-                취소
-              </button>
-              <button className="btn-primary" onClick={submitCarryover}>
-                이월 저장
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
