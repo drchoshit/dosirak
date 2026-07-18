@@ -11,6 +11,13 @@ const LS_KEY = 'doshirak.session.v1';
 function ymd(dt){ const p=n=>String(n).padStart(2,'0'); return `${dt.getFullYear()}-${p(dt.getMonth()+1)}-${p(dt.getDate())}`; }
 function fmtMD(dateStr){ const d=new Date(dateStr); if (isNaN(d)) return dateStr; return `${d.getMonth()+1}/${d.getDate()}`; }
 function fmtDateTime(value){ return value ? String(value).replace('T', ' ') : '미설정'; }
+function fmtKstDate(value){
+  if(!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? String(value).slice(0, 10)
+    : new Intl.DateTimeFormat('sv-SE', { timeZone:'Asia/Seoul' }).format(date);
+}
 function genDates(startStr, endStr){
   const out=[]; const s=new Date(startStr), e=new Date(endStr);
   if(isNaN(s) || isNaN(e)) return out;
@@ -47,12 +54,14 @@ export default function Student(){
 
   // 코드별 임시 선택 저장용
   const [selected, setSelected] = useState({});
+  const [couponAssignments, setCouponAssignments] = useState({});
   const [phone, setPhone] = useState('01022223333');
   const [smsPreview, setSmsPreview] = useState(null);
   const [smsSent, setSmsSent] = useState(true);
   const [showSmsRequire, setShowSmsRequire] = useState(false);
   const [showCommitConfirm, setShowCommitConfirm] = useState(false);
   const [showApplicationClosed, setShowApplicationClosed] = useState(false);
+  const [showCouponNotice, setShowCouponNotice] = useState(false);
   const [lsReady, setLsReady] = useState(false); // 초기 복구 완료 플래그
 
   // 허용 요일: 비어 있으면 월~금 기본 허용
@@ -88,12 +97,14 @@ export default function Student(){
       // 먼저 선택 복구
       const sel = (saved.selections && saved.selections[saved.lastCode]) || {};
       setSelected(sel);
+      setCouponAssignments((saved.coupons && saved.coupons[saved.lastCode]) || {});
       // 정책 자동 로드
       (async ()=>{
         try{
           const res = await api.get('/policy/active', { params:{ code: saved.lastCode } });
           const pol = res.data;
           setPolicy(pol);
+          setShowCouponNotice((pol.carryover_coupons || []).length > 0);
           setShowApplicationClosed(pol.application_is_open === false);
           const s = pol.start_date || ymd(new Date());
           const e = pol.end_date   || s;
@@ -116,6 +127,7 @@ export default function Student(){
     const saved = readLS();
     const sel = (saved.selections && saved.selections[code]) || {};
     setSelected(sel);
+    setCouponAssignments((saved.coupons && saved.coupons[code]) || {});
   },[code, lsReady]);
 
   // 3) 입력/선택이 바뀔 때마다 로컬스토리지 동기화
@@ -123,9 +135,11 @@ export default function Student(){
     if(!lsReady) return;
     const saved = readLS();
     const selections = saved.selections || {};
+    const coupons = saved.coupons || {};
     if(code){ selections[code] = selected; } // 코드가 비어있으면 덮어쓰지 않음
-    writeLS({ lastCode: code, lastName: name, phone, selections });
-  },[code, name, phone, selected, lsReady]);
+    if(code){ coupons[code] = couponAssignments; }
+    writeLS({ lastCode: code, lastName: name, phone, selections, coupons });
+  },[code, name, phone, selected, couponAssignments, lsReady]);
 
   async function enter(){
     if(!code || !name) return alert('코드와 이름을 모두 입력하세요');
@@ -133,6 +147,7 @@ export default function Student(){
       const res = await api.get('/policy/active', { params:{ code } });
       const pol = res.data;
       setPolicy(pol);
+      setShowCouponNotice((pol.carryover_coupons || []).length > 0);
       setShowApplicationClosed(pol.application_is_open === false);
       const s = pol.start_date || ymd(new Date());
       const e = pol.end_date   || s;
@@ -164,6 +179,11 @@ export default function Student(){
       const current = normalizePortion(next[key]);
       if (!portion || current === portion) {
         delete next[key];
+        setCouponAssignments(c => {
+          const nextCoupons = { ...c };
+          delete nextCoupons[key];
+          return nextCoupons;
+        });
         return next;
       }
       next[key] = portion;
@@ -203,6 +223,41 @@ export default function Student(){
     return m;
   }, [carryoverItems]);
 
+  const availableCoupons = policy?.carryover_coupons || [];
+  const availableCouponIds = useMemo(
+    () => new Set(availableCoupons.map((coupon) => Number(coupon.id))),
+    [availableCoupons]
+  );
+  useEffect(() => {
+    if (!policy) return;
+    setCouponAssignments((current) => {
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([, couponId]) =>
+          availableCouponIds.has(Number(couponId))
+        )
+      );
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+  }, [policy, availableCouponIds]);
+
+  function toggleCoupon(date, slot) {
+    const key = `${date}-${slot}`;
+    setCouponAssignments(current => {
+      if (current[key]) {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      }
+      const usedIds = new Set(Object.values(current).map(Number));
+      const coupon = availableCoupons.find(c => !usedIds.has(Number(c.id)));
+      if (!coupon) {
+        alert('사용 가능한 이월 쿠폰이 없습니다.');
+        return current;
+      }
+      return { ...current, [key]: coupon.id };
+    });
+  }
+
   const items = Object.entries(selected)
     .map(([k,v])=>{
       const portion = normalizePortion(v);
@@ -211,8 +266,19 @@ export default function Student(){
       const d = k.slice(0, lastDash);
       const slot = k.slice(lastDash + 1);
       if (carryoverMap.has(`${d}-${slot}`)) return null;
-      const price = portion === 'EXTRA' ? extraPrice : basePrice;
-      return { date: d, slot, portion, price };
+      const requestedCouponId = Number(couponAssignments[`${d}-${slot}`] || 0) || null;
+      const carryoverCouponId =
+        requestedCouponId && availableCouponIds.has(requestedCouponId)
+          ? requestedCouponId
+          : null;
+      const price = carryoverCouponId ? 0 : (portion === 'EXTRA' ? extraPrice : basePrice);
+      return {
+        date: d,
+        slot,
+        portion,
+        price,
+        carryover_coupon_id: carryoverCouponId,
+      };
     })
     .filter(Boolean);
   const total = items.reduce((a,b)=>a+(Number(b.price)||0),0);
@@ -295,12 +361,15 @@ export default function Student(){
   // 현재 코드의 임시 선택만 초기화
   function resetSelections({ silent = false } = {}){
     setSelected({});
+    setCouponAssignments({});
     setSmsSent(true);
     setSmsPreview(null);
     const saved = readLS();
     const selections = saved.selections || {};
+    const coupons = saved.coupons || {};
     if(code) selections[code] = {};
-    writeLS({ lastCode: code, lastName: name, phone, selections });
+    if(code) coupons[code] = {};
+    writeLS({ lastCode: code, lastName: name, phone, selections, coupons });
     if(!silent) alert('선택이 초기화되었습니다.');
   }
 
@@ -344,6 +413,13 @@ export default function Student(){
             {!applicationIsOpen && (
               <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
                 현재 온라인 신청 기간이 아닙니다. 신청 가능 시간은 {fmtDateTime(policy.application_start_at)} ~ {fmtDateTime(policy.application_end_at)} 입니다.
+              </div>
+            )}
+            {availableCoupons.length > 0 && (
+              <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+                사용 가능한 이월 쿠폰이 <b>{availableCoupons.length}장</b> 있습니다.
+                식사를 선택한 뒤 해당 식사의 “이월 쿠폰 적용” 버튼을 누르면 1회 식사가 0원으로 처리됩니다.
+                이월 쿠폰은 발급 후 7일이 지나면 자동으로 만료됩니다.
               </div>
             )}
             <div className="flex items-center justify-between mb-2">
@@ -416,6 +492,19 @@ export default function Student(){
                                 곱빼기
                               </button>
                             </div>
+                            {portion && !carryoverItem && availableCoupons.length > 0 && (
+                              <button
+                                type="button"
+                                className={`mt-2 h-8 w-full rounded-lg border text-xs font-semibold transition ${
+                                  selectedItem?.carryover_coupon_id
+                                    ? 'border-emerald-500 bg-emerald-500 text-white'
+                                    : 'border-emerald-300 bg-white text-emerald-700 hover:bg-emerald-50'
+                                }`}
+                                onClick={() => toggleCoupon(d, slot)}
+                              >
+                                {selectedItem?.carryover_coupon_id ? '이월 쿠폰 적용됨 · 0원' : '이월 쿠폰 적용'}
+                              </button>
+                            )}
                           </div>
                         );
                       })}
@@ -436,7 +525,7 @@ export default function Student(){
             const wd = weekdaysKo[new Date(it.date).getDay()];
             const label = it.source === 'CARRYOVER'
               ? `${slotLabel(it.slot, it.portion)} (이월)`
-              : slotLabel(it.slot, it.portion);
+              : `${slotLabel(it.slot, it.portion)}${it.carryover_coupon_id ? ' (이월 쿠폰)' : ''}`;
             return {
               key: `${it.source || 'ORDER'}-${it.date}-${it.slot}-${idx}`,
               date: it.date,
@@ -521,6 +610,36 @@ export default function Student(){
             <div className="mt-5 flex justify-end">
               <button className="btn-primary" onClick={()=>setShowApplicationClosed(false)}>확인</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {showCouponNotice && availableCoupons.length > 0 && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 px-4">
+          <div className="w-[92vw] max-w-md rounded-2xl bg-white p-7 shadow-xl">
+            <div className="text-2xl font-bold text-emerald-700">이월 쿠폰이 있습니다</div>
+            <div className="mt-3 text-slate-700">
+              현재 사용할 수 있는 이월 쿠폰이 <b>{availableCoupons.length}장</b> 있습니다.
+              신청할 식사를 먼저 선택한 뒤 “이월 쿠폰 적용” 버튼을 눌러 주세요.
+            </div>
+            <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+              이월 쿠폰은 발급일로부터 7일 후 자동으로 없어집니다.
+              {availableCoupons.length > 0 && (
+                <div className="mt-2 space-y-1 font-semibold">
+                  {availableCoupons.map((coupon) => (
+                    <div key={coupon.id}>
+                      쿠폰 #{coupon.id} · {fmtKstDate(coupon.expires_at)}까지
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <button
+              className="btn-primary mt-5 w-full"
+              onClick={() => setShowCouponNotice(false)}
+            >
+              확인
+            </button>
           </div>
         </div>
       )}

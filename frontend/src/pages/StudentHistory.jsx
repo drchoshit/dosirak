@@ -79,6 +79,9 @@ function StudentHistory() {
                   </td>
                   <td className="border border-slate-300 px-2 py-1 text-right">
                     {Number(o.price || 0).toLocaleString()}원
+                    {o.carryover_coupon_id ? (
+                      <span className="ml-1 text-xs font-semibold text-emerald-600">(이월 쿠폰)</span>
+                    ) : null}
                   </td>
                   <td className="border border-slate-300 px-2 py-1 text-center">
                     {o.status === "PAID" ? "결제 완료" : "신청만 함"}

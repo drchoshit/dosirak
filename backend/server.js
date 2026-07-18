@@ -179,6 +179,36 @@ const uploadExcel = multer({ dest: TMP_DIR });
     await run("CREATE INDEX IF NOT EXISTS idx_carryovers_to_date_slot ON carryovers(to_date, to_slot)");
     await run("CREATE INDEX IF NOT EXISTS idx_carryovers_student_to_date ON carryovers(student_id, to_date)");
     await run(`
+      CREATE TABLE IF NOT EXISTS carryover_coupons(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id INTEGER NOT NULL,
+        from_date TEXT NOT NULL,
+        from_slot TEXT NOT NULL CHECK (from_slot IN ('LUNCH','DINNER')),
+        portion TEXT NOT NULL DEFAULT 'BASE' CHECK (portion IN ('BASE','EXTRA')),
+        original_price INTEGER NOT NULL DEFAULT 0,
+        source_type TEXT NOT NULL DEFAULT 'ORDER' CHECK (source_type IN ('ORDER','PHONE')),
+        source_order_id INTEGER,
+        used_order_id INTEGER,
+        used_at TEXT,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE
+      )
+    `);
+    await run("CREATE INDEX IF NOT EXISTS idx_carryover_coupons_student ON carryover_coupons(student_id, used_order_id)");
+    const couponCols = await all("PRAGMA table_info(carryover_coupons)");
+    if (!couponCols.some((c) => c.name === "expires_at")) {
+      await run("ALTER TABLE carryover_coupons ADD COLUMN expires_at TEXT");
+      await run("UPDATE carryover_coupons SET expires_at=datetime(created_at, '+7 days') WHERE expires_at IS NULL OR expires_at=''");
+      console.log("DB migrated: expires_at column added to carryover_coupons table");
+    }
+    const couponOrderCols = await all("PRAGMA table_info(orders)");
+    if (!couponOrderCols.some((c) => c.name === "carryover_coupon_id")) {
+      await run("ALTER TABLE orders ADD COLUMN carryover_coupon_id INTEGER");
+      console.log("DB migrated: carryover_coupon_id column added to orders table");
+    }
+    await run("CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_carryover_coupon ON orders(carryover_coupon_id) WHERE carryover_coupon_id IS NOT NULL");
+    await run(`
       CREATE TABLE IF NOT EXISTS phone_orders(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         student_id INTEGER NOT NULL,
@@ -366,6 +396,49 @@ async function getCarryoversForRange({ start, end, code, studentId, q } = {}) {
     ORDER BY c.to_date ASC, c.to_slot ASC, s.name ASC
   `;
   return all(sql, params);
+}
+
+async function getCarryoverCoupons({ start, end, code, studentId, q, availableOnly = false } = {}) {
+  const where = [];
+  const params = [];
+  if (start) {
+    where.push("cc.from_date >= ?");
+    params.push(start);
+  }
+  if (end) {
+    where.push("cc.from_date <= ?");
+    params.push(end);
+  }
+  if (code) {
+    where.push("s.code = ?");
+    params.push(code);
+  }
+  if (studentId) {
+    where.push("s.id = ?");
+    params.push(studentId);
+  }
+  if (q && String(q).trim()) {
+    where.push("(s.name LIKE ? OR s.code LIKE ?)");
+    params.push(`%${q}%`, `%${q}%`);
+  }
+  if (availableOnly) {
+    where.push("cc.used_order_id IS NULL");
+    where.push("datetime(cc.expires_at) > datetime(?)");
+    params.push(dayjs().toISOString());
+  }
+
+  return all(
+    `
+    SELECT cc.*, s.name, s.code, o.date AS used_date, o.slot AS used_slot,
+           CASE WHEN datetime(cc.expires_at) <= datetime(?) THEN 1 ELSE 0 END AS is_expired
+    FROM carryover_coupons cc
+    JOIN students s ON s.id = cc.student_id
+    LEFT JOIN orders o ON o.id = cc.used_order_id
+    ${where.length ? "WHERE " + where.join(" AND ") : ""}
+    ORDER BY (cc.used_order_id IS NOT NULL) ASC, cc.created_at ASC, cc.id ASC
+    `,
+    [dayjs().toISOString(), ...params]
+  );
 }
 
 async function getPhoneOrdersForRange({ start, end, code, studentId, q } = {}) {
@@ -871,6 +944,10 @@ app.get("/api/policy/active", async (req, res) => {
   const extraPrice = g.extra_price ?? basePrice;
   const appWindow = applicationWindow(g);
   const carryovers = await getCarryoversForRange({ studentId: s.id });
+  const carryoverCoupons = await getCarryoverCoupons({
+    studentId: s.id,
+    availableOnly: true,
+  });
 
   res.json({
     base_price: basePrice,
@@ -883,6 +960,7 @@ app.get("/api/policy/active", async (req, res) => {
     application_now: appWindow.now,
     application_is_open: appWindow.is_open,
     carryovers,
+    carryover_coupons: carryoverCoupons,
     no_service_days: bl,
     student: { id: s.id, name: s.name, code: s.code },
     sms_extra_text: g?.sms_extra_text ?? null,
@@ -949,8 +1027,15 @@ app.post("/api/orders/commit", async (req, res) => {
       if (slot !== "LUNCH" && slot !== "DINNER") continue;
       const portionRaw = String(it.portion || "").toUpperCase();
       const portion = portionRaw === "EXTRA" ? "EXTRA" : "BASE";
-      const price = portion === "EXTRA" ? extraPrice : basePrice;
-      normalizedItems.push({ date, slot, portion, price });
+      const couponId = Number(it.carryover_coupon_id || 0) || null;
+      const price = couponId ? 0 : (portion === "EXTRA" ? extraPrice : basePrice);
+      normalizedItems.push({ date, slot, portion, price, couponId });
+    }
+    const requestedCouponIds = normalizedItems
+      .map((it) => it.couponId)
+      .filter(Boolean);
+    if (new Set(requestedCouponIds).size !== requestedCouponIds.length) {
+      return res.status(400).json({ ok: false, error: "한 장의 이월 쿠폰은 한 식사에만 사용할 수 있습니다." });
     }
 
     let deletedSelected = 0;
@@ -976,6 +1061,14 @@ app.post("/api/orders/commit", async (req, res) => {
       }
 
       if (deleteWhere.length > 2 || normalizedItems.length) {
+        await run(
+          `UPDATE carryover_coupons
+              SET used_order_id=NULL, used_at=NULL
+            WHERE used_order_id IN (
+              SELECT id FROM orders WHERE ${deleteWhere.join(" AND ")}
+            )`,
+          deleteParams
+        );
         const del = await run(
           `DELETE FROM orders WHERE ${deleteWhere.join(" AND ")}`,
           deleteParams
@@ -984,19 +1077,63 @@ app.post("/api/orders/commit", async (req, res) => {
       }
 
       for (const it of normalizedItems) {
-        const result = await run(
+        if (it.couponId) {
+          const coupon = await get(
+            `SELECT id FROM carryover_coupons
+              WHERE id=? AND student_id=? AND used_order_id IS NULL
+                AND datetime(expires_at) > datetime(?)`,
+            [it.couponId, s.id, now]
+          );
+          if (!coupon) {
+            throw new Error("선택한 이월 쿠폰이 이미 사용되었거나 만료되었습니다.");
+          }
+        }
+        const existing = await get(
+          "SELECT id, status, carryover_coupon_id FROM orders WHERE student_id=? AND date=? AND slot=?",
+          [s.id, it.date, it.slot]
+        );
+        if (existing?.status === "PAID" && Number(existing.carryover_coupon_id || 0) !== Number(it.couponId || 0)) {
+          throw new Error("이미 결제 완료된 식사에는 이월 쿠폰을 적용할 수 없습니다.");
+        }
+        await run(
           `
-          INSERT INTO orders(student_id,date,slot,portion,price,status,created_at,updated_at)
-          VALUES(?,?,?,?,?,?,?,?)
+          INSERT INTO orders(student_id,date,slot,portion,price,status,carryover_coupon_id,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?)
           ON CONFLICT(student_id,date,slot) DO UPDATE SET
-            portion=excluded.portion,
-            price=excluded.price,
+            portion=CASE WHEN orders.status='PAID' THEN orders.portion ELSE excluded.portion END,
+            price=CASE WHEN orders.status='PAID' THEN orders.price ELSE excluded.price END,
             status=CASE WHEN orders.status='PAID' THEN 'PAID' ELSE excluded.status END,
+            carryover_coupon_id=CASE WHEN orders.status='PAID' THEN orders.carryover_coupon_id ELSE excluded.carryover_coupon_id END,
             updated_at=excluded.updated_at
           `,
-          [s.id, it.date, it.slot, it.portion, it.price, "SELECTED", now, now]
+          [
+            s.id,
+            it.date,
+            it.slot,
+            it.portion,
+            it.price,
+            it.couponId ? "PAID" : "SELECTED",
+            it.couponId,
+            now,
+            now,
+          ]
         );
-        upserted += Number(result?.changes || 0);
+        const savedOrder = await get(
+          "SELECT id FROM orders WHERE student_id=? AND date=? AND slot=?",
+          [s.id, it.date, it.slot]
+        );
+        if (it.couponId) {
+          const used = await run(
+            `UPDATE carryover_coupons
+                SET used_order_id=?, used_at=?
+              WHERE id=? AND student_id=? AND used_order_id IS NULL`,
+            [savedOrder.id, now, it.couponId, s.id]
+          );
+          if (!Number(used?.changes || 0)) {
+            throw new Error("이월 쿠폰 적용 중 충돌이 발생했습니다. 다시 시도해 주세요.");
+          }
+        }
+        upserted += 1;
       }
 
       await run("COMMIT");
@@ -1068,7 +1205,7 @@ app.get("/api/admin/orders", async (req, res) => {
 
     const sql = `
       SELECT 
-        o.id, o.date, o.slot, o.portion, o.price, o.status,
+        o.id, o.date, o.slot, o.portion, o.price, o.status, o.carryover_coupon_id,
         s.id AS student_id, s.name, s.code
       FROM orders o
       JOIN students s ON s.id = o.student_id
@@ -1099,14 +1236,22 @@ app.get("/api/admin/orders", async (req, res) => {
         portion: r.portion || "BASE",
         price: r.price,
         status: r.status,
+        carryover_coupon_id: r.carryover_coupon_id,
       });
       g.count += 1;
       g.total_amount += Number(r.price || 0);
     }
 
     const carryovers = await getCarryoversForRange({ start, end, q });
+    const carryoverCoupons = await getCarryoverCoupons({ q });
 
-    res.json({ ok: true, rows, groups: Array.from(byStudent.values()), carryovers });
+    res.json({
+      ok: true,
+      rows,
+      groups: Array.from(byStudent.values()),
+      carryovers,
+      carryover_coupons: carryoverCoupons,
+    });
   } catch (e) {
     console.error("GET /api/admin/orders error:", e);
     res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -1117,7 +1262,21 @@ app.get("/api/admin/orders", async (req, res) => {
 app.delete("/api/admin/orders/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const r = await run("DELETE FROM orders WHERE id=?", [id]);
+    await run("BEGIN IMMEDIATE");
+    let r;
+    try {
+      await run(
+        "UPDATE carryover_coupons SET used_order_id=NULL, used_at=NULL WHERE used_order_id=?",
+        [id]
+      );
+      r = await run("DELETE FROM orders WHERE id=?", [id]);
+      await run("COMMIT");
+    } catch (txErr) {
+      try {
+        await run("ROLLBACK");
+      } catch {}
+      throw txErr;
+    }
     res.json({ ok: true, deleted: Number(r?.changes || 0) });
   } catch (e) {
     console.error("DELETE /api/admin/orders/:id error:", e);
@@ -1141,6 +1300,175 @@ app.patch("/api/admin/orders/:id/payment", async (req, res) => {
     res.json({ ok: true, status });
   } catch (e) {
     console.error("PATCH /api/admin/orders/:id/payment error:", e);
+    res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+async function issueCarryoverCoupon({ sourceId, sourceType }) {
+  const isPhone = sourceType === "PHONE";
+  const table = isPhone ? "phone_orders" : "orders";
+  const src = await get(
+    `SELECT source.*, s.name, s.code
+       FROM ${table} source
+       JOIN students s ON s.id=source.student_id
+      WHERE source.id=?`,
+    [sourceId]
+  );
+  if (!src) return null;
+
+  await run("BEGIN IMMEDIATE");
+  try {
+    if (!isPhone && src.carryover_coupon_id) {
+      await run(
+        "UPDATE carryover_coupons SET used_order_id=NULL, used_at=NULL WHERE id=? AND student_id=?",
+        [src.carryover_coupon_id, src.student_id]
+      );
+      await run(`DELETE FROM ${table} WHERE id=?`, [sourceId]);
+      await run("COMMIT");
+      return { id: Number(src.carryover_coupon_id), student: src };
+    }
+    const inserted = await run(
+      `INSERT INTO carryover_coupons(
+         student_id, from_date, from_slot, portion, original_price,
+         source_type, source_order_id, expires_at, created_at
+       ) VALUES(?,?,?,?,?,?,?,?,?)`,
+      [
+        src.student_id,
+        src.date,
+        src.slot,
+        normalizePortionValue(src.portion),
+        Number(src.price || 0),
+        sourceType,
+        isPhone ? null : sourceId,
+        dayjs().add(7, "day").toISOString(),
+        dayjs().toISOString(),
+      ]
+    );
+    await run(`DELETE FROM ${table} WHERE id=?`, [sourceId]);
+    await run("COMMIT");
+    return { id: Number(inserted.lastInsertRowid), student: src };
+  } catch (error) {
+    try {
+      await run("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+}
+
+app.post("/api/admin/orders/:id/carryover-coupon", async (req, res) => {
+  try {
+    const sourceId = Number(req.params.id);
+    if (!sourceId) return res.status(400).json({ ok: false, error: "source order required" });
+    const result = await issueCarryoverCoupon({ sourceId, sourceType: "ORDER" });
+    if (!result) return res.status(404).json({ ok: false, error: "source order not found" });
+    res.json({ ok: true, coupon_id: result.id });
+  } catch (e) {
+    console.error("POST /api/admin/orders/:id/carryover-coupon error:", e);
+    res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post("/api/admin/phone-orders/:id/carryover-coupon", async (req, res) => {
+  try {
+    const sourceId = Number(req.params.id);
+    if (!sourceId) return res.status(400).json({ ok: false, error: "source phone order required" });
+    const result = await issueCarryoverCoupon({ sourceId, sourceType: "PHONE" });
+    if (!result) return res.status(404).json({ ok: false, error: "source phone order not found" });
+    res.json({ ok: true, coupon_id: result.id });
+  } catch (e) {
+    console.error("POST /api/admin/phone-orders/:id/carryover-coupon error:", e);
+    res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.get("/api/admin/carryover-coupons", async (req, res) => {
+  try {
+    const coupons = await getCarryoverCoupons({ q: req.query?.q });
+    res.json({ ok: true, coupons });
+  } catch (e) {
+    console.error("GET /api/admin/carryover-coupons error:", e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.patch("/api/admin/carryover-coupons/:id", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const fromDate = String(req.body?.from_date || "").trim();
+    const fromSlot = normalizeSlot(req.body?.from_slot);
+    const usedDate = String(req.body?.used_date || "").trim();
+    const usedSlot = normalizeSlot(req.body?.used_slot);
+    const expiresAt = String(req.body?.expires_at || "").trim();
+    if (
+      !id ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(fromDate) ||
+      !fromSlot ||
+      !expiresAt ||
+      !dayjs(expiresAt).isValid()
+    ) {
+      return res.status(400).json({ ok: false, error: "원래 식사와 만료일을 확인해 주세요." });
+    }
+
+    const coupon = await get("SELECT * FROM carryover_coupons WHERE id=?", [id]);
+    if (!coupon) return res.status(404).json({ ok: false, error: "coupon not found" });
+    if (coupon.used_order_id && (!/^\d{4}-\d{2}-\d{2}$/.test(usedDate) || !usedSlot)) {
+      return res.status(400).json({ ok: false, error: "사용 완료 쿠폰은 적용 날짜와 구분이 필요합니다." });
+    }
+
+    await run("BEGIN IMMEDIATE");
+    try {
+      if (coupon.used_order_id) {
+        const duplicateOrder = await get(
+          "SELECT id FROM orders WHERE student_id=? AND date=? AND slot=? AND id<>?",
+          [coupon.student_id, usedDate, usedSlot, coupon.used_order_id]
+        );
+        const duplicatePhone = await get(
+          "SELECT id FROM phone_orders WHERE student_id=? AND date=? AND slot=?",
+          [coupon.student_id, usedDate, usedSlot]
+        );
+        const duplicateLegacy = await get(
+          "SELECT id FROM carryovers WHERE student_id=? AND to_date=? AND to_slot=?",
+          [coupon.student_id, usedDate, usedSlot]
+        );
+        if (duplicateOrder || duplicatePhone || duplicateLegacy) {
+          throw new Error("변경하려는 날짜와 구분에 이미 다른 신청이 있습니다.");
+        }
+        await run(
+          "UPDATE orders SET date=?, slot=?, updated_at=? WHERE id=? AND student_id=?",
+          [usedDate, usedSlot, dayjs().toISOString(), coupon.used_order_id, coupon.student_id]
+        );
+      }
+      await run(
+        `UPDATE carryover_coupons
+            SET from_date=?, from_slot=?, expires_at=?
+          WHERE id=?`,
+        [fromDate, fromSlot, expiresAt, id]
+      );
+      await run("COMMIT");
+    } catch (txErr) {
+      try {
+        await run("ROLLBACK");
+      } catch {}
+      throw txErr;
+    }
+    const updated = (await getCarryoverCoupons({})).find((item) => Number(item.id) === id);
+    res.json({ ok: true, coupon: updated });
+  } catch (e) {
+    console.error("PATCH /api/admin/carryover-coupons/:id error:", e);
+    res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.delete("/api/admin/carryover-coupons/:id", async (req, res) => {
+  try {
+    const coupon = await get("SELECT used_order_id FROM carryover_coupons WHERE id=?", [req.params.id]);
+    if (!coupon) return res.status(404).json({ ok: false, error: "coupon not found" });
+    if (coupon.used_order_id) {
+      return res.status(409).json({ ok: false, error: "이미 사용된 쿠폰은 삭제할 수 없습니다." });
+    }
+    const r = await run("DELETE FROM carryover_coupons WHERE id=?", [req.params.id]);
+    res.json({ ok: true, deleted: Number(r?.changes || 0) });
+  } catch (e) {
     res.status(400).json({ ok: false, error: String(e?.message || e) });
   }
 });
@@ -1315,6 +1643,7 @@ app.post("/api/admin/reset-orders", async (req, res) => {
         message: "confirm=true 가 필요합니다.",
       });
     }
+    await run("UPDATE carryover_coupons SET used_order_id=NULL, used_at=NULL WHERE used_order_id IS NOT NULL");
     const result = await run("DELETE FROM orders");
     console.log(`[RESET_ORDERS] 모든 신청 내역 초기화됨: ${result?.changes || 0}건 삭제`);
     res.json({
@@ -1346,7 +1675,23 @@ app.post("/api/admin/orders/cancel-student", async (req, res) => {
     }
 
     const sql = `DELETE FROM orders WHERE ${where.join(" AND ")}`;
-    const r = await run(sql, params);
+    await run("BEGIN IMMEDIATE");
+    let r;
+    try {
+      await run(
+        `UPDATE carryover_coupons
+            SET used_order_id=NULL, used_at=NULL
+          WHERE used_order_id IN (SELECT id FROM orders WHERE ${where.join(" AND ")})`,
+        params
+      );
+      r = await run(sql, params);
+      await run("COMMIT");
+    } catch (txErr) {
+      try {
+        await run("ROLLBACK");
+      } catch {}
+      throw txErr;
+    }
     res.json({ ok: true, deleted: Number(r?.changes || 0) });
   } catch (e) {
     console.error("POST /api/admin/orders/cancel-student error:", e);
@@ -1461,6 +1806,7 @@ app.get("/api/student/orders/:code", async (req, res) => {
          o.portion,
          o.price, 
          o.status,
+         o.carryover_coupon_id,
          'ORDER' AS source
        FROM orders o
        WHERE o.student_id=? 
@@ -1633,7 +1979,8 @@ app.get("/api/admin/print", async (req, res) => {
     all(
       `
       WITH meal_rows AS (
-        SELECT student_id, portion, status, 0 AS is_carryover
+        SELECT student_id, portion, status,
+               CASE WHEN carryover_coupon_id IS NOT NULL THEN 1 ELSE 0 END AS is_carryover
           FROM orders
          WHERE date=? AND slot=? AND status IN ('SELECTED','PAID')
         UNION ALL
