@@ -57,7 +57,7 @@ export default function Student(){
   const [couponAssignments, setCouponAssignments] = useState({});
   const [phone, setPhone] = useState('01022223333');
   const [smsPreview, setSmsPreview] = useState(null);
-  const [smsSent, setSmsSent] = useState(true);
+  const [smsVerifiedKey, setSmsVerifiedKey] = useState(null);
   const [showSmsRequire, setShowSmsRequire] = useState(false);
   const [showCommitConfirm, setShowCommitConfirm] = useState(false);
   const [showApplicationClosed, setShowApplicationClosed] = useState(false);
@@ -282,6 +282,18 @@ export default function Student(){
     })
     .filter(Boolean);
   const total = items.reduce((a,b)=>a+(Number(b.price)||0),0);
+  const currentSmsKey = JSON.stringify({
+    code,
+    phone: phone.trim(),
+    items: items.map(({ date, slot, portion, price, carryover_coupon_id }) => ({
+      date,
+      slot,
+      portion,
+      price,
+      carryover_coupon_id,
+    })),
+  });
+  const smsVerified = smsVerifiedKey === currentSmsKey;
   const summaryItems = [...items, ...carryoverItems].sort((a,b)=>{
     if (a.date !== b.date) return a.date.localeCompare(b.date);
     return String(a.slot).localeCompare(String(b.slot));
@@ -291,7 +303,7 @@ export default function Student(){
     if(!code) return alert('코드를 먼저 입력하세요.');
     if(!applicationIsOpen){ setShowApplicationClosed(true); return; }
     if(items.length===0) return alert('선택이 없습니다.');
-    // 문자 확인 가드 제거: smsSent 여부와 모달 호출을 더 이상 체크하지 않습니다.
+    if(!smsVerified){ setShowSmsRequire(true); return; }
     try{
       await api.post('/orders/commit',{ code, items });
       alert('도시락 신청 완료(결재 전)');
@@ -315,6 +327,7 @@ export default function Student(){
   function openCommitConfirm(){
     if(!applicationIsOpen){ setShowApplicationClosed(true); return; }
     if(items.length===0) { alert('선택이 없습니다.'); return; }
+    if(!smsVerified) { setShowSmsRequire(true); return; }
     setShowCommitConfirm(true);
   }
 
@@ -345,12 +358,12 @@ export default function Student(){
     if(memo){ previewMsg += `\n\n※ 입금 계좌\n${memo}`; }
     previewMsg += `\n\n※ 신청내역\n${lines || '-'}`;
     setSmsPreview(previewMsg);
-    setSmsSent(true);
 
     const to = (phone||'').trim();
     if(!to || to.length < 9){ alert('전화번호를 정확히 입력해 주세요.'); return; }
     try{
       await api.post('/sms/summary', { to, code, items, total, name });
+      setSmsVerifiedKey(currentSmsKey);
       alert('입력하신 번호로 문자가 전송되었습니다.');
     }catch(e){
       console.error('SMS send failed', e?.response?.data||String(e));
@@ -362,7 +375,7 @@ export default function Student(){
   function resetSelections({ silent = false } = {}){
     setSelected({});
     setCouponAssignments({});
-    setSmsSent(true);
+    setSmsVerifiedKey(null);
     setSmsPreview(null);
     const saved = readLS();
     const selections = saved.selections || {};
@@ -552,8 +565,6 @@ export default function Student(){
               </div>
 
               <div className="mt-4 flex flex-col gap-2">
-                <button className="btn-primary" onClick={openCommitConfirm}>*필수클릭* 저장 및 제출하기</button>
-
                 <div className="flex gap-2">
                   <input
                     className="input flex-1"
@@ -563,6 +574,14 @@ export default function Student(){
                   />
                   <button className="btn-ghost" onClick={sms}>신청 내역 문자 받기</button>
                 </div>
+
+                <button
+                  className={`btn-primary ${smsVerified ? '' : 'cursor-not-allowed opacity-50 hover:bg-primary'}`}
+                  onClick={openCommitConfirm}
+                  aria-disabled={!smsVerified}
+                >
+                  도시락 신청하기
+                </button>
 
                 {smsPreview && (
                   <div className="mt-2 p-3 bg-white border rounded-xl">
@@ -650,7 +669,7 @@ export default function Student(){
           <div className="bg-white rounded-2xl p-6 w-[90vw] max-w-md shadow-xl">
             <div className="text-lg font-semibold mb-2">문자 확인 필요</div>
             <div className="text-sm text-slate-600 mb-4">
-              저장이나 결제를 진행하기 전에 먼저 <b>“신청 내역 문자 받기”</b>를 눌러 본인 휴대폰으로 신청 내역을 받아 주세요.
+              전화번호를 입력하고 <b>“신청 내역 문자 받기”</b>를 눌러 문자로 신청 내역을 받아야 도시락 신청이 가능합니다.
             </div>
             <div className="flex justify-end gap-2">
               <button className="btn-ghost" onClick={()=>{ setShowSmsRequire(false); sms(); }}>문자로 받기</button>
