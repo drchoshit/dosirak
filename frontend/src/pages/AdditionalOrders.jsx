@@ -279,7 +279,7 @@ export default function AdditionalOrders() {
           <div>
             <h2 className="text-lg font-bold">학생별 이월 쿠폰 현황</h2>
             <div className="mt-1 text-sm text-slate-500">
-              쿠폰은 발급 후 7일 동안 사용할 수 있습니다. 사용 완료 쿠폰은 원래 식사에서 실제 적용 식사로 이동한 내역을 표시합니다.
+              쿠폰은 발급 후 31일 동안 사용할 수 있습니다. 사용 완료 쿠폰은 원래 식사에서 실제 적용 식사로 이동한 내역을 표시합니다.
             </div>
           </div>
           <div className="text-sm text-slate-500">총 {coupons.length}장</div>

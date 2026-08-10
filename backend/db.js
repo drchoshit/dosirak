@@ -151,7 +151,7 @@ if (!couponColumns.some((column) => column.name === 'expires_at')) {
   db.exec('ALTER TABLE carryover_coupons ADD COLUMN expires_at TEXT');
   db.exec(`
     UPDATE carryover_coupons
-       SET expires_at=datetime(created_at, '+7 days')
+       SET expires_at=datetime(created_at, '+31 days')
      WHERE expires_at IS NULL OR expires_at=''
   `);
 }

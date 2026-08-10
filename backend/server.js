@@ -199,7 +199,7 @@ const uploadExcel = multer({ dest: TMP_DIR });
     const couponCols = await all("PRAGMA table_info(carryover_coupons)");
     if (!couponCols.some((c) => c.name === "expires_at")) {
       await run("ALTER TABLE carryover_coupons ADD COLUMN expires_at TEXT");
-      await run("UPDATE carryover_coupons SET expires_at=datetime(created_at, '+7 days') WHERE expires_at IS NULL OR expires_at=''");
+      await run("UPDATE carryover_coupons SET expires_at=datetime(created_at, '+31 days') WHERE expires_at IS NULL OR expires_at=''");
       console.log("DB migrated: expires_at column added to carryover_coupons table");
     }
     const couponOrderCols = await all("PRAGMA table_info(orders)");
@@ -1340,7 +1340,7 @@ async function issueCarryoverCoupon({ sourceId, sourceType }) {
         Number(src.price || 0),
         sourceType,
         isPhone ? null : sourceId,
-        dayjs().add(7, "day").toISOString(),
+        dayjs().add(31, "day").toISOString(),
         dayjs().toISOString(),
       ]
     );

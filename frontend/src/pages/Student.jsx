@@ -432,7 +432,7 @@ export default function Student(){
               <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
                 사용 가능한 이월 쿠폰이 <b>{availableCoupons.length}장</b> 있습니다.
                 식사를 선택한 뒤 해당 식사의 “이월 쿠폰 적용” 버튼을 누르면 1회 식사가 0원으로 처리됩니다.
-                이월 쿠폰은 발급 후 7일이 지나면 자동으로 만료됩니다.
+                이월 쿠폰은 발급 후 31일이 지나면 자동으로 만료됩니다.
               </div>
             )}
             <div className="flex items-center justify-between mb-2">
@@ -642,7 +642,7 @@ export default function Student(){
               신청할 식사를 먼저 선택한 뒤 “이월 쿠폰 적용” 버튼을 눌러 주세요.
             </div>
             <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-              이월 쿠폰은 발급일로부터 7일 후 자동으로 없어집니다.
+              이월 쿠폰은 발급일로부터 31일 후 자동으로 없어집니다.
               {availableCoupons.length > 0 && (
                 <div className="mt-2 space-y-1 font-semibold">
                   {availableCoupons.map((coupon) => (
