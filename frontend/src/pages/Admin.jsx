@@ -12,6 +12,10 @@ export default function Admin() {
   const [isAuthed, setIsAuthed] = useState(null);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [loginError, setLoginError] = useState('');
+  const [showPolicyLogin, setShowPolicyLogin] = useState(false);
+  const [policyLoginPending, setPolicyLoginPending] = useState(false);
+  const [policySaving, setPolicySaving] = useState(false);
+  const [policyError, setPolicyError] = useState('');
 
   // --- Data states ---
   const [students, setStudents] = useState([]);
@@ -55,12 +59,6 @@ export default function Admin() {
     })();
   }, []);
 
-  // ---- 인증 후 데이터 로드 ----
-  useEffect(() => {
-    if (isAuthed) load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAuthed]);
-
   async function load() {
     const s = await api.get('/admin/students'); setStudents(s.data);
     const p = await api.get('/admin/policy'); setPolicy(p.data);
@@ -86,6 +84,47 @@ export default function Admin() {
     setIsAuthed(false);
     setStudents([]); setPolicy(null); setImages([]); setNosvc([]);
     setWeekly(null);
+  }
+
+  async function savePolicy() {
+    if (policySaving) return;
+    setPolicySaving(true);
+    setPolicyError('');
+    try {
+      await api.post('/admin/policy', { ...policy });
+      alert('정책 저장 완료');
+    } catch (error) {
+      if (error?.response?.status === 401) {
+        // Keep the form mounted: reauthentication must not reload and replace the draft.
+        setLoginError('');
+        setLoginForm(form => ({ ...form, password: '' }));
+        setShowPolicyLogin(true);
+      } else {
+        setPolicyError('정책을 저장하지 못했습니다. 입력한 내용은 유지됩니다. 잠시 후 다시 저장해 주세요.');
+      }
+    } finally {
+      setPolicySaving(false);
+    }
+  }
+
+  async function handlePolicyLogin(event) {
+    event.preventDefault();
+    if (policyLoginPending) return;
+    setPolicyLoginPending(true);
+    setLoginError('');
+    try {
+      await adminAPI.login(loginForm.username, loginForm.password);
+      setLoginForm(form => ({ ...form, password: '' }));
+      setShowPolicyLogin(false);
+      // The administrator can review the unchanged draft and explicitly retry saving.
+      setPolicyError('다시 로그인했습니다. 입력한 정책을 확인한 뒤 저장을 눌러 주세요.');
+    } catch (error) {
+      setLoginError(error?.response?.status === 401
+        ? '아이디 또는 비밀번호가 올바르지 않습니다.'
+        : '로그인하지 못했습니다. 잠시 후 다시 시도해 주세요.');
+    } finally {
+      setPolicyLoginPending(false);
+    }
   }
 
   // --- KPI / 필터 ---
@@ -437,6 +476,28 @@ export default function Admin() {
 
   return (
     <div className="space-y-6">
+      {showPolicyLogin && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+          <form onSubmit={handlePolicyLogin} role="dialog" aria-modal="true" aria-labelledby="policy-login-title"
+            className="w-full max-w-sm rounded-2xl bg-white p-6 space-y-4 shadow-xl">
+            <h2 id="policy-login-title" className="text-lg font-bold">다시 로그인해 주세요</h2>
+            <p className="text-sm text-slate-600">관리자 로그인이 만료되어 저장하지 못했습니다. 입력한 정책은 그대로 유지됩니다.</p>
+            <label className="block text-sm">아이디
+              <input className="mt-1 input w-full" value={loginForm.username} autoComplete="username" autoFocus
+                onChange={event => setLoginForm(form => ({ ...form, username: event.target.value }))} />
+            </label>
+            <label className="block text-sm">비밀번호
+              <input type="password" className="mt-1 input w-full" value={loginForm.password} autoComplete="current-password"
+                onChange={event => setLoginForm(form => ({ ...form, password: event.target.value }))} />
+            </label>
+            {loginError && <div role="alert" className="text-danger text-sm">{loginError}</div>}
+            <div className="flex justify-end gap-2">
+              <button type="button" className="btn-ghost" disabled={policyLoginPending} onClick={() => setShowPolicyLogin(false)}>닫기</button>
+              <button type="submit" className="btn-primary" disabled={policyLoginPending}>{policyLoginPending ? '로그인 중...' : '로그인'}</button>
+            </div>
+          </form>
+        </div>
+      )}
       {/* 상단 바 */}
       <div className="flex flex-wrap items-center gap-3 card p-4">
         <button className="btn-ghost" onClick={() => setShowStudents((s) => !s)}>학생 DB</button>
@@ -727,11 +788,10 @@ export default function Admin() {
               </div>
             </label>
           </div>
-          <button className="btn-primary mt-3" onClick={async () => {
-            const payload = { ...policy };
-            await api.post('/admin/policy', payload);
-            alert('정책 저장 완료');
-          }}>저장</button>
+          {policyError && <div role="status" className="mt-3 text-sm text-slate-600">{policyError}</div>}
+          <button className="btn-primary mt-3" disabled={policySaving} onClick={savePolicy}>
+            {policySaving ? '저장 중...' : '저장'}
+          </button>
 
           {/* 전체 신청 내역 초기화 */}
           <button

@@ -1,6 +1,7 @@
 ﻿import React, { useMemo, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';  // ✅ 이 줄을 바로 아래에 추가
 import api from "../lib/api";
+import { filterDraft, isInPeriod, periodKey, readPeriodDraft, savePeriodDraft } from '../lib/selectionSession';
 
 const weekdaysKo = ['일','월','화','수','목','금','토'];
 const slots = ['LUNCH','DINNER'];
@@ -55,6 +56,7 @@ export default function Student(){
   // 코드별 임시 선택 저장용
   const [selected, setSelected] = useState({});
   const [couponAssignments, setCouponAssignments] = useState({});
+  const [draftScope, setDraftScope] = useState('');
   const [phone, setPhone] = useState('01022223333');
   const [smsPreview, setSmsPreview] = useState(null);
   const [smsVerifiedKey, setSmsVerifiedKey] = useState(null);
@@ -81,6 +83,21 @@ export default function Student(){
   const extraPrice = policy?.extra_price ?? basePrice;
   const applicationIsOpen = policy?.application_is_open !== false;
 
+  function applyPolicy(pol, studentCode) {
+    const draft = readPeriodDraft(readLS(), studentCode, pol);
+    setSelected(draft.selected);
+    setCouponAssignments(draft.coupons);
+    setDraftScope(JSON.stringify([studentCode, periodKey(pol)]));
+    setPolicy(pol);
+    setSmsVerifiedKey(null);
+    setSmsPreview(null);
+    setShowCouponNotice((pol.carryover_coupons || []).length > 0);
+    setShowApplicationClosed(pol.application_is_open === false);
+    const start = pol.start_date || ymd(new Date());
+    setRangeStart(start);
+    setRangeEnd(pol.end_date || start);
+  }
+
   // 기간 → 날짜 배열
   useEffect(()=>{
     if(rangeStart && rangeEnd) setWeekDates(genDates(rangeStart, rangeEnd));
@@ -89,69 +106,46 @@ export default function Student(){
 
   // 1) 로컬스토리지에서 복구 + 자동 입장
   useEffect(()=>{
+    let active = true;
     const saved = readLS();
     if(saved.lastCode){
       setCode(saved.lastCode || '');
       setName(saved.lastName || '');
       setPhone(saved.phone || '01022223333');
-      // 먼저 선택 복구
-      const sel = (saved.selections && saved.selections[saved.lastCode]) || {};
-      setSelected(sel);
-      setCouponAssignments((saved.coupons && saved.coupons[saved.lastCode]) || {});
-      // 정책 자동 로드
+      // 현재 기간을 확인한 뒤 그 기간의 임시 선택만 복구
       (async ()=>{
         try{
           const res = await api.get('/policy/active', { params:{ code: saved.lastCode } });
-          const pol = res.data;
-          setPolicy(pol);
-          setShowCouponNotice((pol.carryover_coupons || []).length > 0);
-          setShowApplicationClosed(pol.application_is_open === false);
-          const s = pol.start_date || ymd(new Date());
-          const e = pol.end_date   || s;
-          setRangeStart(s); setRangeEnd(e);
+          if (active) applyPolicy(res.data, saved.lastCode);
         }catch(e){
           // 자동 복구 실패해도 저장 데이터는 지우지 않음
-          setPolicy(null); setRangeStart(''); setRangeEnd(''); setWeekDates([]);
+          if (active) { setPolicy(null); setRangeStart(''); setRangeEnd(''); setWeekDates([]); }
         }finally{
-          setLsReady(true);
+          if (active) setLsReady(true);
         }
       })();
     }else{
       setLsReady(true);
     }
+    return () => { active = false; };
   },[]);
 
-  // 2) 코드가 바뀌면 해당 코드의 선택을 복원
+  // 입장한 학생/기간이 일치할 때만 저장하여 다른 학생이나 기간의 선택을 보존
   useEffect(()=>{
-    if(!lsReady) return;
+    if(!lsReady || !policy || policy.student?.code !== code
+      || draftScope !== JSON.stringify([code, periodKey(policy)])) return;
     const saved = readLS();
-    const sel = (saved.selections && saved.selections[code]) || {};
-    setSelected(sel);
-    setCouponAssignments((saved.coupons && saved.coupons[code]) || {});
-  },[code, lsReady]);
-
-  // 3) 입력/선택이 바뀔 때마다 로컬스토리지 동기화
-  useEffect(()=>{
-    if(!lsReady) return;
-    const saved = readLS();
-    const selections = saved.selections || {};
-    const coupons = saved.coupons || {};
-    if(code){ selections[code] = selected; } // 코드가 비어있으면 덮어쓰지 않음
-    if(code){ coupons[code] = couponAssignments; }
-    writeLS({ lastCode: code, lastName: name, phone, selections, coupons });
-  },[code, name, phone, selected, couponAssignments, lsReady]);
+    writeLS({
+      ...savePeriodDraft(saved, code, policy, { selected, coupons: couponAssignments }),
+      lastCode: code, lastName: name, phone,
+    });
+  },[code, name, phone, selected, couponAssignments, lsReady, policy, draftScope]);
 
   async function enter(){
     if(!code || !name) return alert('코드와 이름을 모두 입력하세요');
     try{
       const res = await api.get('/policy/active', { params:{ code } });
-      const pol = res.data;
-      setPolicy(pol);
-      setShowCouponNotice((pol.carryover_coupons || []).length > 0);
-      setShowApplicationClosed(pol.application_is_open === false);
-      const s = pol.start_date || ymd(new Date());
-      const e = pol.end_date   || s;
-      setRangeStart(s); setRangeEnd(e);
+      applyPolicy(res.data, code);
     }catch(err){
       const status = err?.response?.status;
       if(status === 404) alert('해당 코드의 학생을 찾을 수 없습니다. 관리자에게 학생 등록 여부를 확인해 주세요.');
@@ -206,6 +200,7 @@ export default function Student(){
 
   const carryoverItems = useMemo(() => {
     return (policy?.carryovers || [])
+      .filter(c => isInPeriod(c.to_date, policy))
       .map(c => ({
         date: c.to_date,
         slot: c.to_slot,
@@ -231,14 +226,10 @@ export default function Student(){
   useEffect(() => {
     if (!policy) return;
     setCouponAssignments((current) => {
-      const next = Object.fromEntries(
-        Object.entries(current).filter(([, couponId]) =>
-          availableCouponIds.has(Number(couponId))
-        )
-      );
+      const next = filterDraft({ selected, coupons: current }, policy).coupons;
       return Object.keys(next).length === Object.keys(current).length ? current : next;
     });
-  }, [policy, availableCouponIds]);
+  }, [policy, availableCouponIds, selected]);
 
   function toggleCoupon(date, slot) {
     const key = `${date}-${slot}`;
@@ -265,6 +256,7 @@ export default function Student(){
       const lastDash = k.lastIndexOf('-');
       const d = k.slice(0, lastDash);
       const slot = k.slice(lastDash + 1);
+      if (!isInPeriod(d, policy) || !slots.includes(slot)) return null;
       if (carryoverMap.has(`${d}-${slot}`)) return null;
       const requestedCouponId = Number(couponAssignments[`${d}-${slot}`] || 0) || null;
       const carryoverCouponId =
@@ -299,16 +291,48 @@ export default function Student(){
     return String(a.slot).localeCompare(String(b.slot));
   });
 
+  async function verifyCurrentPeriod() {
+    try {
+      const { data: latest } = await api.get('/policy/active', { params: { code } });
+      if (periodKey(latest) !== periodKey(policy) || latest.student?.code !== policy?.student?.code) {
+        applyPolicy(latest, code);
+        alert('신청 기간이 변경되었습니다. 새 기간의 선택 내역을 확인해 주세요.');
+        return false;
+      }
+      if (latest.application_is_open === false) {
+        setPolicy(latest);
+        setShowApplicationClosed(true);
+        return false;
+      }
+      return true;
+    } catch {
+      alert('현재 신청 기간을 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.');
+      return false;
+    }
+  }
+
   async function commit(){
     if(!code) return alert('코드를 먼저 입력하세요.');
     if(!applicationIsOpen){ setShowApplicationClosed(true); return; }
     if(items.length===0) return alert('선택이 없습니다.');
     if(!smsVerified){ setShowSmsRequire(true); return; }
+    if(!await verifyCurrentPeriod()) return;
     try{
       await api.post('/orders/commit',{ code, items });
       alert('도시락 신청 완료(결재 전)');
       resetSelections({ silent: true });
+      // 신청에 실제 사용된 쿠폰만 보유 목록에서 제외한다.
+      const usedCouponIds = new Set(items.map(it => it.carryover_coupon_id).filter(Boolean));
+      setPolicy(p => p ? {
+        ...p,
+        carryover_coupons: (p.carryover_coupons || []).filter(c => !usedCouponIds.has(Number(c.id))),
+      } : p);
     }catch(e){
+      if(e?.response?.data?.error === 'ORDER_OUTSIDE_PERIOD') {
+        await enter();
+        alert('신청 기간이 변경되었습니다. 현재 기간의 식사를 다시 확인해 주세요.');
+        return;
+      }
       if(e?.response?.status === 403 && e?.response?.data?.error === 'APPLICATION_CLOSED'){
         setPolicy(p => p ? {
           ...p,
@@ -334,6 +358,7 @@ export default function Student(){
   // 문자 전송(미리보기 포함)
   async function sms(){
     if(items.length===0) { alert('선택이 없습니다'); return; }
+    if(!await verifyCurrentPeriod()) return;
 
     const grouped = items.reduce((acc, it) => { (acc[it.date] = acc[it.date] || []).push(it); return acc; }, {});
     const orderedDates = Object.keys(grouped).sort();
@@ -378,12 +403,10 @@ export default function Student(){
     setSmsVerifiedKey(null);
     setSmsPreview(null);
     const saved = readLS();
-    const selections = saved.selections || {};
-    const coupons = saved.coupons || {};
-    if(code) selections[code] = {};
-    if(code) coupons[code] = {};
-    writeLS({ lastCode: code, lastName: name, phone, selections, coupons });
-    if(!silent) alert('선택이 초기화되었습니다.');
+    if (code && policy && policy.student?.code === code) {
+      writeLS(savePeriodDraft(saved, code, policy, { selected: {}, coupons: {} }));
+    }
+    if(!silent) alert('선택이 초기화되었습니다. 보유한 이월 쿠폰과 이미 신청한 내역은 유지됩니다. 쿠폰은 식사를 다시 선택한 뒤 적용해 주세요.');
   }
 
   return (
@@ -392,7 +415,15 @@ export default function Student(){
       <section className="card p-5 lg:col-span-2">
         <h2 className="text-xl font-bold mb-3">학생 입장</h2>
         <div className="flex gap-2 flex-col sm:flex-row sm:items-center">
-          <input className="flex-1 border rounded-xl px-3 py-2" placeholder="코드 입력 (예: dfv201)" value={code} onChange={e=>setCode(e.target.value)}/>
+          <input className="flex-1 border rounded-xl px-3 py-2" placeholder="코드 입력 (예: dfv201)" value={code} onChange={e=>{
+            setCode(e.target.value);
+            setPolicy(null);
+            setDraftScope('');
+            setSelected({});
+            setCouponAssignments({});
+            setSmsVerifiedKey(null);
+            setSmsPreview(null);
+          }}/>
           <input className="flex-1 border rounded-xl px-3 py-2" placeholder="이름 입력" value={name} onChange={e=>setName(e.target.value)}/>
           <button className="btn-primary" onClick={enter}>입장</button>
         </div>

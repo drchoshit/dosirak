@@ -943,7 +943,7 @@ app.get("/api/policy/active", async (req, res) => {
   const basePrice = s.price_override ?? g.base_price ?? 0;
   const extraPrice = g.extra_price ?? basePrice;
   const appWindow = applicationWindow(g);
-  const carryovers = await getCarryoversForRange({ studentId: s.id });
+  const carryovers = await getCarryoversForRange({ studentId: s.id, start: start_date, end: end_date });
   const carryoverCoupons = await getCarryoverCoupons({
     studentId: s.id,
     availableOnly: true,
@@ -1023,6 +1023,9 @@ app.post("/api/orders/commit", async (req, res) => {
       if (!it?.date || !it?.slot) continue;
       const date = String(it.date || "").trim();
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+      if ((windowStart && date < windowStart) || (windowEnd && date > windowEnd)) {
+        return res.status(400).json({ ok: false, error: "ORDER_OUTSIDE_PERIOD" });
+      }
       const slot = String(it.slot || "").toUpperCase();
       if (slot !== "LUNCH" && slot !== "DINNER") continue;
       const portionRaw = String(it.portion || "").toUpperCase();
